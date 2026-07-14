@@ -44,6 +44,21 @@ def test_validate_bars_rejects_impossible_ohlc() -> None:
         validate_bars(frame, "EURUSD")
 
 
+def test_validate_bars_can_explicitly_drop_bad_provider_rows() -> None:
+    frame = pd.DataFrame(
+        {
+            "timestamp": ["2025-01-01", "2025-01-02", "2025-01-03"],
+            "open": [1, 1, 1],
+            "high": [1.1, 0.9, 1.1],
+            "low": [0.9, 0.8, 0.9],
+            "close": [1, 1, 1],
+        }
+    )
+    with pytest.warns(RuntimeWarning, match="dropping 1"):
+        cleaned = validate_bars(frame, "EURUSD", invalid_ohlc="drop")
+    assert len(cleaned) == 2
+
+
 def test_synthetic_crosses_are_currency_graph_consistent() -> None:
     data = SyntheticFXProvider(seed=7).generate(
         ["EURUSD", "USDJPY", "EURJPY"], bars=200, interval="4h"

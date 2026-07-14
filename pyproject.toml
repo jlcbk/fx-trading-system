@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "fx-portfolio-system"
-version = "0.1.0"
+version = "0.2.0"
 description = "Multi-currency FX research, backtesting, risk and paper-trading system"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -19,6 +19,7 @@ dependencies = [
   "rich>=13.7,<15",
   "yfinance>=0.2.54,<2",
   "statsmodels>=0.14,<1",
+  "scikit-learn>=1.6,<2",
   "httpx>=0.27,<1",
 ]
 

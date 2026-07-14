@@ -10,5 +10,6 @@ htmlcov/
 dist/
 data/*.csv
 data/*.parquet
+data/**
 outputs/*
 !outputs/.gitkeep

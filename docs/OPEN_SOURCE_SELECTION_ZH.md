@@ -7,7 +7,10 @@
 | [NautilusTrader](https://github.com/nautechsystems/nautilus_trader) | 24,694 | LGPL-3.0 | 架构参考 | 事件驱动、模型/风险/执行分层；整包引入对轻量本地 Python 交付过重 |
 | [yfinance](https://github.com/ranaroussi/yfinance) | 24,700 | Apache-2.0 | 直接复用 | 公共研究行情下载与缓存入口 |
 | [statsmodels](https://github.com/statsmodels/statsmodels) | 11,510 | BSD-3-Clause | 直接复用 | Engle–Granger 协整检验，避免重写统计检验 |
+| [scikit-learn](https://github.com/scikit-learn/scikit-learn) | 66,680 | BSD-3-Clause | 直接复用 | Elastic-net Logistic、预处理、Platt 校准和概率评分 |
 | [Optuna](https://github.com/optuna/optuna) | 14,502 | MIT | 可选依赖 | 后续只在 walk-forward 内层做有界参数搜索 |
+| [Qlib](https://github.com/microsoft/qlib) | 46,238 | MIT | 评估后未整包引入 | 因子理念成熟，但默认数据/组合抽象偏股票；FX graph 与 barrier 仍需自定义 |
+| [LightGBM](https://github.com/microsoft/LightGBM) | 18,561 | MIT | 暂缓 | 非线性交互候选；先用可解释线性基线建立无泄漏门槛 |
 | [QuantConnect Lean](https://github.com/QuantConnect/Lean) | 20,528 | Apache-2.0 | 未作为核心 | 功能完整但 C#/Python 混合部署和本地 broker 模型明显超出本项目重量 |
 | [Backtrader](https://github.com/mementum/backtrader) | 22,439 | GPL-3.0 | 未采用 | 活跃度较低、许可证和跨货币组合敞口改造成本不合适 |
 | [Backtesting.py](https://github.com/kernc/backtesting.py) | 8,674 | AGPL-3.0 | 未采用 | 适合单资产研究，不适合本系统共享货币敞口的核心要求 |

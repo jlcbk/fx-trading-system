@@ -17,6 +17,8 @@ from .brokers import OandaPracticeBroker
 from .config import SystemConfig
 from .data import YahooFXProvider, load_from_config, save_csv_directory
 from .engine import BacktestEngine
+from .factor_config import FactorMiningConfig
+from .factor_research import run_factor_mining, write_factor_artifacts
 from .planner import create_paper_plan
 from .reporting import write_backtest_artifacts
 from .research import generate_ensemble_signals, screen_strategies, walk_forward
@@ -69,6 +71,52 @@ def download(
     destination = output or parsed.data.directory
     save_csv_directory(data, destination)
     console.print(f"[green]Saved[/green] {len(data)} symbols to {destination}")
+
+
+@app.command("factor-download")
+def factor_download(
+    config: Annotated[Path, typer.Option("--config", "-c")] = Path("configs/factors_daily.yaml"),
+    output: Annotated[Path | None, typer.Option("--output", "-o")] = None,
+) -> None:
+    parsed = FactorMiningConfig.from_yaml(config)
+    console.print("Downloading long-horizon public FX data for factor research…")
+    data = YahooFXProvider.download(
+        parsed.data.symbols, parsed.data.start, parsed.data.end, parsed.data.interval
+    )
+    destination = output or parsed.data.directory
+    save_csv_directory(data, destination)
+    console.print(f"[green]Saved[/green] {len(data)} symbols to {destination}")
+
+
+@app.command("factor-mine")
+def factor_mine(
+    config: Annotated[Path, typer.Option("--config", "-c")] = Path("configs/factors_daily.yaml"),
+    output: Annotated[Path | None, typer.Option("--output", "-o")] = None,
+) -> None:
+    parsed = FactorMiningConfig.from_yaml(config)
+    data = load_from_config(parsed.data)
+    mining = run_factor_mining(data, parsed)
+    destination = write_factor_artifacts(mining, data, parsed, output)
+    table = Table(title="Purged walk-forward multi-factor results")
+    for column in ("Fold", "Kind", "Test", "AUC", "Trades", "Return", "PF", "Max DD"):
+        table.add_column(column)
+    for fold in mining.folds:
+        table.add_row(
+            str(fold.fold),
+            fold.kind,
+            f"{fold.test_start.date()} → {fold.test_end.date()}",
+            f"{fold.model_metrics['roc_auc']:.3f}",
+            str(fold.trading_metrics["trades"]),
+            f"{fold.trading_metrics['total_return']:.2%}",
+            f"{fold.trading_metrics['profit_factor']:.3f}",
+            f"{fold.trading_metrics['max_drawdown']:.2%}",
+        )
+    console.print(table)
+    console.print(
+        f"Compounded OOS return: {mining.summary['compounded_return']:.2%}; "
+        f"positive folds: {mining.summary['positive_folds']}/{mining.summary['folds']}"
+    )
+    console.print(f"Artifacts: [cyan]{destination.resolve()}[/cyan]")
 
 
 @app.command()

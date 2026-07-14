@@ -74,11 +74,14 @@ class BacktestEngine:
         data: Mapping[str, pd.DataFrame],
         signals: list[Signal],
         metadata: dict[str, object] | None = None,
+        risk_history_data: Mapping[str, pd.DataFrame] | None = None,
     ) -> BacktestResult:
         if not data:
             raise ValueError("Backtest requires at least one symbol")
         rate_graph = FXRateGraph(data, self.account_currency)
-        risk_manager = PortfolioRiskManager(self.risk_config, rate_graph, self._returns(data))
+        risk_manager = PortfolioRiskManager(
+            self.risk_config, rate_graph, self._returns(risk_history_data or data)
+        )
         schedule = self._execution_schedule(signals, data)
         timestamps = sorted(set().union(*(frame.index for frame in data.values())))
         positions: dict[str, Position] = {}
@@ -102,12 +105,20 @@ class BacktestEngine:
             return frame.loc[timestamp]
 
         def close_position(
-            position: Position, timestamp: pd.Timestamp, mid: float, reason: str
+            position: Position,
+            timestamp: pd.Timestamp,
+            mid: float,
+            reason: str,
+            phase: str,
         ) -> None:
             nonlocal cash
             exit_price = self.cost_model.fill(mid, position.symbol, position.side, is_entry=False)
             pair = CurrencyPair.parse(position.symbol)
-            prices = rate_graph.prices_at(timestamp)
+            prices = (
+                rate_graph.prices_at_open(timestamp)
+                if phase == "open"
+                else rate_graph.prices_at(timestamp)
+            )
             prices[position.symbol] = mid
             quote_conversion = FXRateGraph.convert_with_prices(
                 1.0, pair.quote, self.account_currency, prices
@@ -145,9 +156,13 @@ class BacktestEngine:
             cash += net
             positions.pop(position.symbol, None)
 
-        def current_equity(timestamp: pd.Timestamp) -> tuple[float, float]:
+        def current_equity(timestamp: pd.Timestamp, phase: str) -> tuple[float, float]:
             unrealized = 0.0
-            prices = rate_graph.prices_at(timestamp)
+            prices = (
+                rate_graph.prices_at_open(timestamp)
+                if phase == "open"
+                else rate_graph.prices_at(timestamp)
+            )
             for position in positions.values():
                 if position.symbol not in prices:
                     continue
@@ -180,15 +195,15 @@ class BacktestEngine:
                 else float(bar["low"]) <= position.target_price
             )
             if stop_hit:
-                close_position(position, timestamp, position.stop_price, "STOP")
+                close_position(position, timestamp, position.stop_price, "STOP", "open")
                 return True
             if target_hit:
-                close_position(position, timestamp, position.target_price, "TARGET")
+                close_position(position, timestamp, position.target_price, "TARGET", "open")
                 return True
             return False
 
         for timestamp in timestamps:
-            equity_before, _ = current_equity(timestamp)
+            equity_before, _ = current_equity(timestamp, "open")
             if timestamp.date() != current_day:
                 current_day = timestamp.date()
                 day_start_equity = equity_before
@@ -199,7 +214,7 @@ class BacktestEngine:
             for position in list(positions.values()):
                 bar = bar_at(position.symbol, timestamp)
                 if bar is not None and timestamp >= position.max_exit_time:
-                    close_position(position, timestamp, float(bar["open"]), "MAX_HOLD")
+                    close_position(position, timestamp, float(bar["open"]), "MAX_HOLD", "open")
 
             # Existing stops/targets. If both were touched, stop wins; this is conservative.
             for position in list(positions.values()):
@@ -232,7 +247,11 @@ class BacktestEngine:
                     if existing is not None:
                         if existing.side != signal.side:
                             close_position(
-                                existing, timestamp, float(bar["open"]), "OPPOSITE_SIGNAL"
+                                existing,
+                                timestamp,
+                                float(bar["open"]),
+                                "OPPOSITE_SIGNAL",
+                                "open",
                             )
                         else:
                             rejected.append(
@@ -240,7 +259,7 @@ class BacktestEngine:
                             )
                             group_failed = True
                             continue
-                    equity_now, _ = current_equity(timestamp)
+                    equity_now, _ = current_equity(timestamp, "open")
                     peak_now = max(peak, equity_now)
                     drawdown_now = max(0.0, 1 - equity_now / peak_now) if peak_now else 0.0
                     decision = risk_manager.evaluate(
@@ -315,9 +334,9 @@ class BacktestEngine:
                         or len(data[position.symbol].loc[timestamp:]) == 1
                     )
                     if bar is not None and should_close:
-                        close_position(position, timestamp, float(bar["close"]), "WEEKEND")
+                        close_position(position, timestamp, float(bar["close"]), "WEEKEND", "close")
 
-            equity_now, unrealized = current_equity(timestamp)
+            equity_now, unrealized = current_equity(timestamp, "close")
             peak = max(peak, equity_now)
             drawdown = max(0.0, 1 - equity_now / peak) if peak else 0.0
             prices = rate_graph.prices_at(timestamp)
@@ -337,13 +356,19 @@ class BacktestEngine:
                 for position in list(positions.values()):
                     bar = bar_at(position.symbol, timestamp)
                     mid = float(bar["close"]) if bar is not None else prices[position.symbol]
-                    close_position(position, timestamp, mid, "DRAWDOWN_KILL")
+                    close_position(position, timestamp, mid, "DRAWDOWN_KILL", "close")
                 halted = True
 
         last_timestamp = timestamps[-1]
         last_prices = rate_graph.prices_at(last_timestamp)
         for position in list(positions.values()):
-            close_position(position, last_timestamp, last_prices[position.symbol], "END_OF_DATA")
+            close_position(
+                position,
+                last_timestamp,
+                last_prices[position.symbol],
+                "END_OF_DATA",
+                "close",
+            )
 
         if equity_curve:
             final_point = equity_curve[-1]

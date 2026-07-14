@@ -23,6 +23,17 @@ class FXRateGraph:
                 prices[symbol] = float(frame.iloc[location][field])
         return prices
 
+    def prices_at_open(self, timestamp: pd.Timestamp) -> dict[str, float]:
+        """Prices knowable at an event open: exact-bar open, otherwise prior close."""
+        prices: dict[str, float] = {}
+        for symbol, frame in self.data.items():
+            location = frame.index.searchsorted(timestamp, side="left")
+            if location < len(frame) and frame.index[location] == timestamp:
+                prices[symbol] = float(frame.iloc[location]["open"])
+            elif location > 0:
+                prices[symbol] = float(frame.iloc[location - 1]["close"])
+        return prices
+
     @staticmethod
     def convert_with_prices(
         amount: float,

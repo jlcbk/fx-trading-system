@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import warnings
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -14,7 +15,11 @@ from .models import CurrencyPair, utc_timestamp
 REQUIRED_COLUMNS = ("open", "high", "low", "close")
 
 
-def validate_bars(frame: pd.DataFrame, symbol: str = "unknown") -> pd.DataFrame:
+def validate_bars(
+    frame: pd.DataFrame,
+    symbol: str = "unknown",
+    invalid_ohlc: str = "raise",
+) -> pd.DataFrame:
     result = frame.copy()
     result.columns = [str(column).lower().replace(" ", "_") for column in result.columns]
     missing = set(REQUIRED_COLUMNS) - set(result.columns)
@@ -46,9 +51,21 @@ def validate_bars(frame: pd.DataFrame, symbol: str = "unknown") -> pd.DataFrame:
         | (result[list(REQUIRED_COLUMNS)] <= 0).any(axis=1)
     )
     if invalid.any():
-        raise ValueError(f"{symbol}: {int(invalid.sum())} invalid OHLC rows")
+        invalid_count = int(invalid.sum())
+        if invalid_ohlc == "drop":
+            warnings.warn(
+                f"{symbol}: dropping {invalid_count} invalid provider OHLC rows",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            result = result.loc[~invalid]
+        else:
+            raise ValueError(f"{symbol}: {invalid_count} invalid OHLC rows")
+    else:
+        invalid_count = 0
     if len(result) < 2:
         raise ValueError(f"{symbol}: not enough valid bars")
+    result.attrs["dropped_invalid_ohlc"] = invalid_count
     return result
 
 
@@ -76,6 +93,18 @@ def save_csv_directory(data: Mapping[str, pd.DataFrame], directory: str | Path) 
     root.mkdir(parents=True, exist_ok=True)
     for symbol, frame in data.items():
         frame.to_csv(root / f"{symbol}.csv", index=True)
+    manifest = {
+        "symbols": {
+            symbol: {
+                "rows": len(frame),
+                "start": frame.index[0].isoformat(),
+                "end": frame.index[-1].isoformat(),
+                "dropped_invalid_ohlc": int(frame.attrs.get("dropped_invalid_ohlc", 0)),
+            }
+            for symbol, frame in data.items()
+        }
+    }
+    (root / "_data_manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
 
 
 class YahooFXProvider:
@@ -110,7 +139,10 @@ class YahooFXProvider:
             if frame.empty:
                 raise RuntimeError(f"Yahoo returned no data for {symbol}=X")
             frame = frame.rename(columns=str.lower)
-            if frame.index.tz is None:
+            if interval == "1d":
+                # Preserve the provider's trading-date label without DST-driven 23:00 shifts.
+                frame.index = pd.DatetimeIndex(frame.index.date).tz_localize("UTC")
+            elif frame.index.tz is None:
                 frame.index = frame.index.tz_localize("UTC")
             else:
                 frame.index = frame.index.tz_convert("UTC")
@@ -132,7 +164,7 @@ class YahooFXProvider:
                 )
                 frame = frame.loc[frame["_samples"] == 4].drop(columns="_samples")
             frame = drop_incomplete_bars(frame, interval)
-            result[symbol] = validate_bars(frame, symbol)
+            result[symbol] = validate_bars(frame, symbol, invalid_ohlc="drop")
         return result
 
 

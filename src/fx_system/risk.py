@@ -72,7 +72,9 @@ class PortfolioRiskManager:
     ) -> int:
         if signal.symbol not in self.returns:
             return 1
-        history = self.returns.loc[:timestamp].tail(self.config.correlation_lookback)
+        history = self.returns.loc[self.returns.index < timestamp].tail(
+            self.config.correlation_lookback
+        )
         count = 1
         for position in positions.values():
             if position.symbol not in history or position.symbol == signal.symbol:
@@ -109,7 +111,7 @@ class PortfolioRiskManager:
         if signal.reward_risk > self.config.max_reward_risk + 1e-12:
             return RiskDecision(False, reason="reward_risk_limit")
 
-        prices = self.rate_graph.prices_at(timestamp)
+        prices = self.rate_graph.prices_at_open(timestamp)
         prices[signal.symbol] = entry_mid
         pair = CurrencyPair.parse(signal.symbol)
         stop_distance = signal.atr * signal.stop_atr
