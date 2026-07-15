@@ -253,7 +253,9 @@ def test_small_factor_mining_pipeline_runs_out_of_sample() -> None:
         assert fold.selected_features
         assert fold.model_metrics["rows"] == settings.test_bars * len(symbols) * 2
         assert fold.model_metrics["calibration_rows"] >= settings.minimum_calibration_samples
-        assert {"estimated_cost_r", "expected_net_r"}.issubset(fold.predictions.columns)
+        assert {"estimated_swap_r", "estimated_cost_r", "expected_net_r"}.issubset(
+            fold.predictions.columns
+        )
 
     strict_settings = settings.model_copy(
         update={

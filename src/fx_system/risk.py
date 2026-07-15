@@ -99,6 +99,7 @@ class PortfolioRiskManager:
         timestamp: pd.Timestamp,
         drawdown: float,
         daily_return: float,
+        execution_stop_distance: float | None = None,
     ) -> RiskDecision:
         if drawdown >= self.config.max_drawdown:
             return RiskDecision(False, reason="drawdown_kill_switch")
@@ -114,7 +115,11 @@ class PortfolioRiskManager:
         prices = self.rate_graph.prices_at_open(timestamp)
         prices[signal.symbol] = entry_mid
         pair = CurrencyPair.parse(signal.symbol)
-        stop_distance = signal.atr * signal.stop_atr
+        stop_distance = (
+            execution_stop_distance
+            if execution_stop_distance is not None
+            else signal.atr * signal.stop_atr
+        )
         if not math.isfinite(stop_distance) or stop_distance <= 0:
             return RiskDecision(False, reason="invalid_stop_distance")
         try:

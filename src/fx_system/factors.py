@@ -8,6 +8,7 @@ import pandas as pd
 
 from .indicators import atr, ema, rolling_zscore, rsi
 from .models import CurrencyPair
+from .point_in_time import PointInTimeData, build_carry_factors
 
 
 @dataclass(frozen=True)
@@ -147,6 +148,42 @@ def _definitions() -> list[FactorDefinition]:
         True,
         "Cross-pair standardized 12-bar currency-graph residual",
     )
+    add(
+        "rate_differential",
+        "carry",
+        True,
+        "Point-in-time base minus quote policy-rate differential",
+    )
+    add(
+        "curve_slope_differential",
+        "carry",
+        True,
+        "Point-in-time base minus quote OIS curve-slope differential",
+    )
+    add(
+        "forward_discount_1m",
+        "carry",
+        True,
+        "Annualized one-month forward discount known at feature time",
+    )
+    add(
+        "carry_to_vol_20",
+        "carry",
+        True,
+        "Policy-rate differential divided by 20-bar annualized volatility",
+    )
+    add(
+        "spread_atr",
+        "execution_state",
+        False,
+        "Observed close bid/ask spread normalized by ATR",
+    )
+    add(
+        "spread_z_20",
+        "execution_state",
+        False,
+        "Observed close bid/ask spread z-score over 20 bars",
+    )
     return result
 
 
@@ -257,7 +294,10 @@ def _currency_graph(
     return output
 
 
-def build_factor_panel(data: Mapping[str, pd.DataFrame]) -> pd.DataFrame:
+def build_factor_panel(
+    data: Mapping[str, pd.DataFrame],
+    point_in_time: PointInTimeData | None = None,
+) -> pd.DataFrame:
     """Build close-of-bar factors; every rolling calculation ends at the feature timestamp."""
     graph_features = _currency_graph(data)
     panels: list[pd.DataFrame] = []
@@ -354,6 +394,35 @@ def build_factor_panel(data: Mapping[str, pd.DataFrame]) -> pd.DataFrame:
         factors["hour_cos"] = np.cos(2 * np.pi * frame.index.hour / 24)
         factors["weekday_sin"] = np.sin(2 * np.pi * frame.index.dayofweek / 5)
         factors["weekday_cos"] = np.cos(2 * np.pi * frame.index.dayofweek / 5)
+        if point_in_time is not None:
+            median_seconds = (
+                float(np.median(np.diff(frame.index.view("int64"))) / 1e9)
+                if len(frame) > 1
+                else 86400
+            )
+            if median_seconds >= 20 * 3600:
+                periods_per_year = 260
+            elif median_seconds >= 3 * 3600:
+                periods_per_year = 6 * 260
+            else:
+                periods_per_year = 24 * 260
+            factors = factors.join(
+                build_carry_factors(symbol, frame, point_in_time, periods_per_year)
+            )
+        else:
+            for carry_factor in (
+                "rate_differential",
+                "curve_slope_differential",
+                "forward_discount_1m",
+                "carry_to_vol_20",
+            ):
+                factors[carry_factor] = np.nan
+        if "spread_close" in frame:
+            factors["spread_atr"] = frame["spread_close"] / current_atr.replace(0, np.nan)
+            factors["spread_z_20"] = rolling_zscore(frame["spread_close"], 20)
+        else:
+            factors["spread_atr"] = np.nan
+            factors["spread_z_20"] = np.nan
         factors = factors.join(graph_features[symbol])
         factors["_close"] = close
         factors["_atr"] = current_atr

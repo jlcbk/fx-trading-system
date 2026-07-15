@@ -10,8 +10,10 @@ from .models import CurrencyPair
 
 
 class DataConfig(BaseModel):
-    provider: Literal["csv", "yahoo", "synthetic"] = "synthetic"
+    provider: Literal["csv", "yahoo", "synthetic", "oanda"] = "synthetic"
     directory: Path = Path("data")
+    swap_directory: Path | None = None
+    maximum_swap_staleness_days: int = Field(14, ge=1, le=366)
     symbols: list[str] = Field(
         default_factory=lambda: [
             "EURUSD",
@@ -24,6 +26,7 @@ class DataConfig(BaseModel):
         ]
     )
     interval: Literal["1h", "4h", "1d"] = "4h"
+    price_mode: Literal["mid", "bid_ask"] = "mid"
     start: str = "2018-01-01"
     end: str | None = None
     seed: int = 42
@@ -45,6 +48,8 @@ class CostConfig(BaseModel):
     commission_per_million: float = Field(35.0, ge=0)
     daily_swap_pips_long: dict[str, float] = Field(default_factory=dict)
     daily_swap_pips_short: dict[str, float] = Field(default_factory=dict)
+    quote_spread_multiplier: float = Field(1.0, ge=1.0, le=5.0)
+    swap_multiplier: float = Field(1.0, ge=0.0, le=5.0)
 
     def spread_for(self, symbol: str) -> float:
         return self.spread_pips.get(symbol, self.default_spread_pips)

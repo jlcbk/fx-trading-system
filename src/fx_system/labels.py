@@ -11,6 +11,20 @@ from .factors import directional_factor_columns, factor_columns
 from .models import Side
 
 
+def _executable_price(
+    frame: pd.DataFrame,
+    location: int,
+    field: str,
+    direction: int,
+    is_entry: bool,
+) -> float:
+    buying = (direction > 0 and is_entry) or (direction < 0 and not is_entry)
+    column = f"{'ask' if buying else 'bid'}_{field}"
+    if column in frame:
+        return float(frame[column].iloc[location])
+    return float(frame[field].iloc[location])
+
+
 def _label_symbol(
     frame: pd.DataFrame,
     atr_values: pd.Series,
@@ -25,11 +39,12 @@ def _label_symbol(
             continue
         entry_location = feature_location + 1
         entry_time = index[entry_location]
-        entry_price = float(frame["open"].iloc[entry_location])
+        entry_mid = float(frame["open"].iloc[entry_location])
+        entry_price = _executable_price(frame, entry_location, "open", direction, True)
         stop_distance = settings.stop_atr * current_atr
         target_distance = settings.target_atr * current_atr
-        stop_price = entry_price - direction * stop_distance
-        target_price = entry_price + direction * target_distance
+        stop_price = entry_mid - direction * stop_distance
+        target_price = entry_mid + direction * target_distance
         deadline = entry_time + timedelta(hours=settings.max_holding_hours)
         if index[-1] < deadline:
             # Do not train on a right-censored observation with an incomplete future horizon.
@@ -46,14 +61,25 @@ def _label_symbol(
                 event = "timeout"
                 label = 0
                 label_end_time = timestamp
-                exit_price = float(frame["open"].iloc[future_location])
+                exit_price = _executable_price(frame, future_location, "open", direction, False)
                 realized_r = direction * (exit_price - entry_price) / stop_distance
-                realized_r = float(np.clip(realized_r, -1, settings.reward_risk))
+                realized_r = float(np.clip(realized_r, -2, settings.reward_risk))
                 timed_out_at_open = True
                 break
             last_location = future_location
-            high = float(frame["high"].iloc[future_location])
-            low = float(frame["low"].iloc[future_location])
+            exit_side = "bid" if direction > 0 else "ask"
+            high_column = f"{exit_side}_high"
+            low_column = f"{exit_side}_low"
+            high = float(
+                frame[high_column].iloc[future_location]
+                if high_column in frame
+                else frame["high"].iloc[future_location]
+            )
+            low = float(
+                frame[low_column].iloc[future_location]
+                if low_column in frame
+                else frame["low"].iloc[future_location]
+            )
             stop_hit = low <= stop_price if direction > 0 else high >= stop_price
             target_hit = high >= target_price if direction > 0 else low <= target_price
             # Intrabar order is unknowable; a simultaneous touch is scored as a stop.
@@ -61,21 +87,29 @@ def _label_symbol(
                 event = "stop"
                 label = 0
                 label_end_time = timestamp
-                realized_r = -1.0
+                realized_r = (
+                    direction * (stop_price - entry_price) / stop_distance
+                    if "bid_open" in frame
+                    else -1.0
+                )
                 break
             if target_hit:
                 event = "target"
                 label = 1
                 label_end_time = timestamp
-                realized_r = settings.reward_risk
+                realized_r = (
+                    direction * (target_price - entry_price) / stop_distance
+                    if "bid_open" in frame
+                    else settings.reward_risk
+                )
                 break
         else:
             last_location = len(frame) - 1
         if event == "timeout" and not timed_out_at_open:
             label_end_time = index[last_location]
-            exit_price = float(frame["close"].iloc[last_location])
+            exit_price = _executable_price(frame, last_location, "close", direction, False)
             realized_r = direction * (exit_price - entry_price) / stop_distance
-            realized_r = float(np.clip(realized_r, -1, settings.reward_risk))
+            realized_r = float(np.clip(realized_r, -2, settings.reward_risk))
         records.append(
             {
                 "_feature_time": index[feature_location],
@@ -85,6 +119,7 @@ def _label_symbol(
                 "_label": label,
                 "_event": event,
                 "_entry_price": entry_price,
+                "_entry_mid": entry_mid,
                 "_realized_r": realized_r,
             }
         )
@@ -95,10 +130,12 @@ def build_directional_dataset(
     factor_panel: pd.DataFrame,
     data: Mapping[str, pd.DataFrame],
     settings: FactorSettings,
+    features: list[str] | None = None,
+    directional: set[str] | None = None,
 ) -> pd.DataFrame:
     """Create symmetric long/short observations with future barriers kept as metadata."""
-    directional = directional_factor_columns()
-    features = factor_columns()
+    directional = directional if directional is not None else directional_factor_columns()
+    features = features if features is not None else factor_columns()
     datasets: list[pd.DataFrame] = []
     for symbol, frame in sorted(data.items()):
         symbol_factors = (

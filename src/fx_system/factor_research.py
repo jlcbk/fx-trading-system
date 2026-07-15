@@ -17,9 +17,12 @@ from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 
 from .analytics import calculate_metrics, equity_frame, trades_frame
+from .data import has_bid_ask
 from .engine import BacktestEngine
 from .factor_config import FactorMiningConfig, FactorSettings
+from .factor_dsl import generate_discovery_factors, generated_catalog
 from .factors import (
+    FACTOR_DEFINITIONS,
     build_factor_panel,
     directional_factor_columns,
     factor_catalog,
@@ -27,6 +30,7 @@ from .factors import (
 )
 from .labels import build_directional_dataset
 from .models import BacktestResult, CurrencyPair, Side, Signal
+from .point_in_time import PointInTimeData
 from .rates import FXRateGraph
 from .reporting import data_fingerprint
 
@@ -49,6 +53,7 @@ class FactorFold:
     result: BacktestResult
     model_metrics: dict[str, float | int]
     trading_metrics: dict[str, Any]
+    stress_metrics: dict[str, dict[str, Any]]
 
 
 @dataclass
@@ -57,6 +62,7 @@ class FactorMiningResult:
     dataset: pd.DataFrame
     folds: list[FactorFold]
     summary: dict[str, Any]
+    catalog: pd.DataFrame
 
 
 def _bucket_spread(values: pd.Series, labels: pd.Series) -> float:
@@ -122,7 +128,11 @@ def _benjamini_hochberg(p_values: pd.Series) -> np.ndarray:
     return result
 
 
-def _independent_factor_observations(frame: pd.DataFrame, feature: str) -> pd.DataFrame:
+def _independent_factor_observations(
+    frame: pd.DataFrame,
+    feature: str,
+    directional_features: set[str],
+) -> pd.DataFrame:
     required = {"_feature_time", "_symbol", "_direction"}
     outcome_column = "_realized_r" if "_realized_r" in frame else "_label"
     if not required.issubset(frame.columns):
@@ -143,7 +153,7 @@ def _independent_factor_observations(frame: pd.DataFrame, feature: str) -> pd.Da
         outcome_sides.columns
     ):
         return pd.DataFrame(columns=["value", "outcome", "timestamp"])
-    if feature in directional_factor_columns():
+    if feature in directional_features:
         values = (feature_sides[1] - feature_sides[-1]) / 2
         outcomes = (outcome_sides[1] - outcome_sides[-1]) / 2
     else:
@@ -154,15 +164,25 @@ def _independent_factor_observations(frame: pd.DataFrame, feature: str) -> pd.Da
     return result.reset_index(drop=True)
 
 
-def factor_statistics(frame: pd.DataFrame, settings: FactorSettings) -> pd.DataFrame:
-    features = factor_columns()
+def factor_statistics(
+    frame: pd.DataFrame,
+    settings: FactorSettings,
+    features: list[str] | None = None,
+    directional_features: set[str] | None = None,
+) -> pd.DataFrame:
+    features = features if features is not None else factor_columns()
+    directional_features = (
+        directional_features
+        if directional_features is not None
+        else directional_factor_columns()
+    )
     if {"_feature_time", "_symbol"}.issubset(frame.columns):
         independent_population = len(frame[["_feature_time", "_symbol"]].drop_duplicates())
     else:
         independent_population = len(frame)
     rows: list[dict[str, Any]] = []
     for feature_number, feature in enumerate(features):
-        valid = _independent_factor_observations(frame, feature)
+        valid = _independent_factor_observations(frame, feature, directional_features)
         coverage = float(len(valid) / independent_population) if independent_population else 0.0
         information_coefficient = (
             float(valid["value"].corr(valid["outcome"], method="spearman"))
@@ -201,7 +221,7 @@ def factor_statistics(frame: pd.DataFrame, settings: FactorSettings) -> pd.DataF
                 "independent_rows": len(valid),
                 "test_role": (
                     "directional_payoff_difference"
-                    if feature in directional_factor_columns()
+                    if feature in directional_features
                     else "average_payoff_regime"
                 ),
             }
@@ -214,10 +234,15 @@ def factor_statistics(frame: pd.DataFrame, settings: FactorSettings) -> pd.DataF
     ).reset_index(drop=True)
 
 
-def screen_factors(train: pd.DataFrame, settings: FactorSettings) -> tuple[list[str], pd.DataFrame]:
-    features = factor_columns()
+def screen_factors(
+    train: pd.DataFrame,
+    settings: FactorSettings,
+    features: list[str] | None = None,
+    directional_features: set[str] | None = None,
+) -> tuple[list[str], pd.DataFrame]:
+    features = features if features is not None else factor_columns()
     clean = train[features].replace([np.inf, -np.inf], np.nan)
-    statistics = factor_statistics(train, settings)
+    statistics = factor_statistics(train, settings, features, directional_features)
     significance_eligible = (
         statistics["fdr_significant"]
         if settings.require_fdr_significance
@@ -296,10 +321,12 @@ def _add_economic_scores(
     predictions: pd.DataFrame,
     data: Mapping[str, pd.DataFrame],
     config: FactorMiningConfig,
+    target_mean_r: float,
     non_target_mean_r: float,
 ) -> pd.DataFrame:
     rate_graph = FXRateGraph(data)
     estimated_costs: list[float] = []
+    estimated_swaps: list[float] = []
     for _, row in predictions.iterrows():
         symbol = str(row["_symbol"])
         pair = CurrencyPair.parse(symbol)
@@ -311,22 +338,57 @@ def _add_economic_scores(
             )
         except ValueError:
             estimated_costs.append(float("nan"))
+            estimated_swaps.append(float("nan"))
             continue
         stop_risk = float(row["_atr"]) * config.factor.stop_atr * quote_conversion
-        execution_price_cost = (
-            config.costs.spread_for(symbol) + 2 * config.costs.slippage_pips
-        ) * pair.pip_size
+        spread_pips = 0.0 if has_bid_ask(data[symbol]) else config.costs.spread_for(symbol)
+        execution_price_cost = (spread_pips + 2 * config.costs.slippage_pips) * pair.pip_size
         execution_cost = execution_price_cost * quote_conversion
         commission_cost = 2 * config.costs.commission_per_million / 1_000_000
+        direction = int(row["_direction"])
+        swap_column = "swap_long_pips" if direction > 0 else "swap_short_pips"
+        configured_swaps = (
+            config.costs.daily_swap_pips_long
+            if direction > 0
+            else config.costs.daily_swap_pips_short
+        )
+        daily_swap = configured_swaps.get(symbol, 0.0)
+        if swap_column in data[symbol]:
+            known_swaps = data[symbol].loc[
+                data[symbol].index <= timestamp, swap_column
+            ].dropna()
+            if len(known_swaps):
+                daily_swap = float(known_swaps.iloc[-1])
+        entry_time = pd.Timestamp(row["_entry_time"])
+        last_rollover = entry_time + timedelta(hours=config.factor.max_holding_hours)
+        swap_pips = 0.0
+        rollover = entry_time.normalize() + timedelta(days=1)
+        while rollover <= last_rollover.normalize():
+            if rollover.dayofweek < 5:
+                swap_pips += daily_swap * (3 if rollover.dayofweek == 2 else 1)
+            rollover += timedelta(days=1)
+        swap_r = (
+            swap_pips
+            * config.costs.swap_multiplier
+            * pair.pip_size
+            * quote_conversion
+            / stop_risk
+            if stop_risk > 0
+            else float("nan")
+        )
+        estimated_swaps.append(swap_r)
         estimated_costs.append(
-            (execution_cost + commission_cost) / stop_risk + config.factor.cost_buffer_r
+            (execution_cost + commission_cost) / stop_risk
+            - swap_r
+            + config.factor.cost_buffer_r
             if stop_risk > 0
             else float("nan")
         )
     result = predictions.copy()
+    result["estimated_swap_r"] = estimated_swaps
     result["estimated_cost_r"] = estimated_costs
     result["expected_net_r"] = (
-        result["probability"] * config.factor.reward_risk
+        result["probability"] * target_mean_r
         + (1 - result["probability"]) * non_target_mean_r
         - result["estimated_cost_r"]
     )
@@ -390,6 +452,84 @@ def _slice_data(
     return {symbol: frame.loc[start:end] for symbol, frame in data.items()}
 
 
+def _stressed_costs(config: FactorMiningConfig, multiplier: float) -> Any:
+    costs = config.costs
+    return costs.model_copy(
+        update={
+            "default_spread_pips": costs.default_spread_pips * multiplier,
+            "spread_pips": {
+                symbol: value * multiplier for symbol, value in costs.spread_pips.items()
+            },
+            "slippage_pips": costs.slippage_pips * multiplier,
+            "commission_per_million": costs.commission_per_million * multiplier,
+            "quote_spread_multiplier": min(5.0, costs.quote_spread_multiplier * multiplier),
+            "swap_multiplier": min(5.0, costs.swap_multiplier * multiplier),
+        }
+    )
+
+
+def _data_readiness(
+    data: Mapping[str, pd.DataFrame],
+    panel: pd.DataFrame,
+    config: FactorMiningConfig,
+    point_in_time: PointInTimeData | None,
+) -> dict[str, Any]:
+    history_years = {
+        symbol: float((frame.index[-1] - frame.index[0]).total_seconds() / (365.25 * 86400))
+        for symbol, frame in data.items()
+    }
+    bid_ask_symbols = [symbol for symbol, frame in data.items() if has_bid_ask(frame)]
+    swap_coverage = {
+        symbol: float(
+            frame[["swap_long_pips", "swap_short_pips"]].notna().all(axis=1).mean()
+        )
+        if {"swap_long_pips", "swap_short_pips"}.issubset(frame.columns)
+        else 0.0
+        for symbol, frame in data.items()
+    }
+    carry_coverage = float(panel["rate_differential"].notna().mean())
+    broker_ready = (
+        config.data.provider != "synthetic"
+        and len(bid_ask_symbols) == len(data)
+        and min(history_years.values()) >= config.factor.minimum_broker_history_years
+        and min(swap_coverage.values()) >= config.factor.minimum_auxiliary_coverage
+        and point_in_time is not None
+        and config.point_in_time.provider != "synthetic"
+        and carry_coverage >= config.factor.minimum_auxiliary_coverage
+    )
+    return {
+        "tier": (
+            "software_validation"
+            if config.data.provider == "synthetic"
+            else ("broker_bid_ask" if len(bid_ask_symbols) == len(data) else "midpoint_research")
+        ),
+        "broker_ready": broker_ready,
+        "minimum_history_years": min(history_years.values()),
+        "history_years_by_symbol": history_years,
+        "bid_ask_symbols": bid_ask_symbols,
+        "minimum_swap_coverage": min(swap_coverage.values()),
+        "swap_coverage_by_symbol": swap_coverage,
+        "carry_coverage": carry_coverage,
+        "required_history_years": config.factor.minimum_broker_history_years,
+        "required_auxiliary_coverage": config.factor.minimum_auxiliary_coverage,
+    }
+
+
+def audit_factor_data(
+    data: Mapping[str, pd.DataFrame],
+    config: FactorMiningConfig,
+    point_in_time: PointInTimeData | None = None,
+) -> dict[str, Any]:
+    panel = build_factor_panel(data, point_in_time)
+    return {
+        **_data_readiness(data, panel, config, point_in_time),
+        "market_data_fingerprint_sha256": data_fingerprint(data),
+        "point_in_time_fingerprint_sha256": (
+            point_in_time.fingerprint() if point_in_time is not None else None
+        ),
+    }
+
+
 def _fold_boundaries(
     timestamps: list[pd.Timestamp], settings: FactorSettings
 ) -> list[tuple[pd.Timestamp, pd.Timestamp, pd.Timestamp, pd.Timestamp, pd.Timestamp]]:
@@ -442,10 +582,32 @@ def _holdout_boundary(
 
 
 def run_factor_mining(
-    data: Mapping[str, pd.DataFrame], config: FactorMiningConfig
+    data: Mapping[str, pd.DataFrame],
+    config: FactorMiningConfig,
+    point_in_time: PointInTimeData | None = None,
 ) -> FactorMiningResult:
-    panel = build_factor_panel(data)
-    dataset = build_directional_dataset(panel, data, config.factor)
+    panel = build_factor_panel(data, point_in_time)
+    definitions: dict[str, Any] = dict(FACTOR_DEFINITIONS)
+    panel, generated = generate_discovery_factors(panel, definitions, config.discovery)
+    data_readiness = _data_readiness(data, panel, config, point_in_time)
+    for item in generated:
+        definitions[item.name] = item
+    features = list(definitions)
+    directional_features = {
+        name for name, definition in definitions.items() if definition.directional
+    }
+    dataset = build_directional_dataset(
+        panel,
+        data,
+        config.factor,
+        features,
+        directional_features,
+    )
+    catalog = pd.concat(
+        [factor_catalog(), generated_catalog(generated)],
+        ignore_index=True,
+        sort=False,
+    )
     common_times = sorted(set.intersection(*(set(frame.index) for frame in data.values())))
     boundaries = _fold_boundaries(common_times, config.factor)
     holdout_boundary = _holdout_boundary(common_times, config.factor)
@@ -492,7 +654,12 @@ def run_factor_mining(
             )
         if model_train["_label"].nunique() < 2 or calibration["_label"].nunique() < 2:
             raise RuntimeError(f"Fold {fold_number} fit/calibration split lacks both classes")
-        selected, statistics = screen_factors(model_train, config.factor)
+        selected, statistics = screen_factors(
+            model_train,
+            config.factor,
+            features,
+            directional_features,
+        )
         if selected:
             model = _build_model(config.factor)
             model.fit(model_train[selected], model_train["_label"])
@@ -534,8 +701,20 @@ def run_factor_mining(
         predictions["probability"] = probabilities
         predictions["fold"] = fold_number
         non_target_mean_r = float(calibration.loc[calibration["_label"] == 0, "_realized_r"].mean())
-        predictions = _add_economic_scores(predictions, data, config, non_target_mean_r)
-        oos_statistics = factor_statistics(test, config.factor).assign(
+        target_mean_r = float(calibration.loc[calibration["_label"] == 1, "_realized_r"].mean())
+        predictions = _add_economic_scores(
+            predictions,
+            data,
+            config,
+            target_mean_r,
+            non_target_mean_r,
+        )
+        oos_statistics = factor_statistics(
+            test,
+            config.factor,
+            features,
+            directional_features,
+        ).assign(
             fold=fold_number, kind=kind
         )
         auc = float(roc_auc_score(test["_label"], probabilities))
@@ -554,22 +733,34 @@ def run_factor_mining(
                 roc_auc_score(calibration["_label"], calibration_probabilities)
             ),
             "non_target_mean_r": non_target_mean_r,
+            "target_mean_r": target_mean_r,
             "mean_estimated_cost_r": float(predictions["estimated_cost_r"].mean()),
             "minimum_expected_net_r": config.factor.minimum_expected_net_r,
         }
         signals = _signals_from_predictions(predictions, config.factor, fold_number)
         test_data = _slice_data(data, test_start, evaluation_end)
-        result = BacktestEngine(config.risk, config.costs).run(
-            test_data,
-            signals,
-            {
-                "factor_fold": fold_number,
-                "minimum_expected_net_r": config.factor.minimum_expected_net_r,
-                "selected_features": selected,
-            },
-            risk_history_data=_slice_data(data, train_start, evaluation_end),
-        )
-        trading_metrics = calculate_metrics(result)
+        risk_history = _slice_data(data, train_start, evaluation_end)
+        stress_results: dict[str, BacktestResult] = {}
+        stress_metrics: dict[str, dict[str, Any]] = {}
+        for multiplier in config.factor.cost_stress_multipliers:
+            key = f"{multiplier:g}x"
+            stress_result = BacktestEngine(
+                config.risk, _stressed_costs(config, multiplier)
+            ).run(
+                test_data,
+                signals,
+                {
+                    "factor_fold": fold_number,
+                    "cost_stress_multiplier": multiplier,
+                    "minimum_expected_net_r": config.factor.minimum_expected_net_r,
+                    "selected_features": selected,
+                },
+                risk_history_data=risk_history,
+            )
+            stress_results[key] = stress_result
+            stress_metrics[key] = calculate_metrics(stress_result)
+        result = stress_results["1x"]
+        trading_metrics = stress_metrics["1x"]
         folds.append(
             FactorFold(
                 fold_number,
@@ -588,6 +779,7 @@ def run_factor_mining(
                 result,
                 model_metrics,
                 trading_metrics,
+                stress_metrics,
             )
         )
 
@@ -595,6 +787,51 @@ def run_factor_mining(
     holdout = next((fold for fold in folds if fold.kind == "holdout"), None)
     returns = [float(fold.trading_metrics["total_return"]) for fold in development_folds]
     trades = [int(fold.trading_metrics["trades"]) for fold in development_folds]
+    cost_stress: dict[str, dict[str, Any]] = {}
+    for multiplier in config.factor.cost_stress_multipliers:
+        key = f"{multiplier:g}x"
+        stress_returns = [
+            float(fold.stress_metrics[key]["total_return"]) for fold in development_folds
+        ]
+        cost_stress[key] = {
+            "compounded_return": float(np.prod([1 + value for value in stress_returns]) - 1),
+            "positive_folds": sum(value > 0 for value in stress_returns),
+            "minimum_fold_profit_factor": float(
+                min(fold.stress_metrics[key]["profit_factor"] for fold in development_folds)
+            ),
+            "total_trades": int(
+                sum(fold.stress_metrics[key]["trades"] for fold in development_folds)
+            ),
+        }
+    required_stress_key = f"{config.factor.promotion_required_stress_multiplier:g}x"
+    positive_fraction = sum(value > 0 for value in returns) / len(returns)
+    development_passes = (
+        data_readiness["broker_ready"]
+        and all(fold.selected_features for fold in development_folds)
+        and sum(trades) >= config.factor.promotion_minimum_trades
+        and positive_fraction >= config.factor.promotion_minimum_positive_fold_fraction
+        and all(
+            fold.trading_metrics["profit_factor"]
+            >= config.factor.promotion_minimum_profit_factor
+            for fold in development_folds
+        )
+        and cost_stress[required_stress_key]["compounded_return"] > 0
+    )
+    holdout_passes = bool(
+        holdout is not None
+        and holdout.trading_metrics["total_return"] > 0
+        and holdout.trading_metrics["profit_factor"]
+        >= config.factor.promotion_minimum_profit_factor
+    )
+    verdict = (
+        "research_candidate_requires_paper"
+        if development_passes and holdout_passes
+        else (
+            "research_candidate_requires_new_holdout"
+            if development_passes and holdout is None
+            else "rejected_for_trading"
+        )
+    )
     summary = {
         "folds": len(development_folds),
         "positive_folds": sum(value > 0 for value in returns),
@@ -610,6 +847,14 @@ def run_factor_mining(
         "minimum_expected_net_r": config.factor.minimum_expected_net_r,
         "reward_risk": config.factor.reward_risk,
         "maximum_holding_hours": config.factor.max_holding_hours,
+        "point_in_time_fingerprint_sha256": (
+            point_in_time.fingerprint() if point_in_time is not None else None
+        ),
+        "generated_factor_count": len(generated),
+        "factor_hypotheses_tested": len(features),
+        "data_readiness": data_readiness,
+        "cost_stress": cost_stress,
+        "verdict": verdict,
         "holdout": (
             {
                 "test_start": holdout.test_start,
@@ -624,7 +869,7 @@ def run_factor_mining(
             else None
         ),
     }
-    return FactorMiningResult(panel, dataset, folds, summary)
+    return FactorMiningResult(panel, dataset, folds, summary, catalog)
 
 
 def _json_default(value: object) -> str | int | float | None:
@@ -645,7 +890,7 @@ def write_factor_artifacts(
 ) -> Path:
     output = Path(output_directory or config.factor.output_directory)
     output.mkdir(parents=True, exist_ok=True)
-    factor_catalog().to_csv(output / "factor_catalog.csv", index=False)
+    mining.catalog.to_csv(output / "factor_catalog.csv", index=False)
     all_statistics = pd.concat([fold.factor_statistics for fold in mining.folds], ignore_index=True)
     all_coefficients = pd.concat([fold.coefficients for fold in mining.folds], ignore_index=True)
     all_oos_statistics = pd.concat(
@@ -663,6 +908,17 @@ def write_factor_artifacts(
         all_oos_statistics.loc[all_oos_statistics["fold"].isin(development_folds)],
     )
     stability.to_csv(output / "factor_stability.csv", index=False)
+    stress_rows = [
+        {
+            "fold": fold.fold,
+            "kind": fold.kind,
+            "multiplier": multiplier,
+            **metrics,
+        }
+        for fold in mining.folds
+        for multiplier, metrics in fold.stress_metrics.items()
+    ]
+    pd.DataFrame(stress_rows).to_csv(output / "cost_stress_by_fold.csv", index=False)
 
     fold_payload = []
     for fold in mining.folds:
@@ -685,6 +941,7 @@ def write_factor_artifacts(
                 "selected_features": fold.selected_features,
                 "model_metrics": fold.model_metrics,
                 "trading_metrics": fold.trading_metrics,
+                "stress_metrics": fold.stress_metrics,
             }
         )
     (output / "fold_results.json").write_text(
@@ -702,13 +959,24 @@ def write_factor_artifacts(
         "summary": mining.summary,
     }
     try:
-        manifest["git_revision"] = subprocess.run(
+        revision = subprocess.run(
             ["git", "rev-parse", "HEAD"], capture_output=True, text=True, check=True
         ).stdout.strip()
+        dirty = bool(
+            subprocess.run(
+                ["git", "status", "--porcelain"],
+                capture_output=True,
+                text=True,
+                check=True,
+            ).stdout.strip()
+        )
+        manifest["git_revision"] = f"{revision}-dirty" if dirty else revision
+        manifest["git_dirty"] = dirty
     except (OSError, subprocess.CalledProcessError):
         manifest["git_revision"] = "uncommitted"
+        manifest["git_dirty"] = True
     source_manifest_path = Path(config.data.directory) / "_data_manifest.json"
-    if source_manifest_path.exists():
+    if config.data.provider == "csv" and source_manifest_path.exists():
         manifest["source_data_quality"] = json.loads(
             source_manifest_path.read_text(encoding="utf-8")
         )
@@ -796,13 +1064,26 @@ def _markdown_factor_report(
     top = stability.head(12)
     factor_rows = "\n".join(factor_row(row) for row in top.itertuples())
     summary = mining.summary
+    stress_rows = "\n".join(
+        (
+            f"| {multiplier} | {metrics['compounded_return']:.2%} | "
+            f"{metrics['positive_folds']}/{summary['folds']} | "
+            f"{metrics['minimum_fold_profit_factor']:.3f} | {metrics['total_trades']} |"
+        )
+        for multiplier, metrics in summary["cost_stress"].items()
+    )
     holdout = summary["holdout"]
+    holdout_verdict = (
+        "It passed the configured research gates but still requires forward paper validation."
+        if summary["verdict"] == "research_candidate_requires_paper"
+        else "It does not pass the configured promotion gates."
+    )
     holdout_section = (
         "## Untouched holdout verdict\n\n"
         f"The holdout from {pd.Timestamp(holdout['test_start']).date()} to "
         f"{pd.Timestamp(holdout['test_end']).date()} produced {holdout['trades']} trades, "
         f"{holdout['total_return']:.2%} return, PF {holdout['profit_factor']:.3f}, and "
-        f"ROC AUC {holdout['roc_auc']:.3f}. This does not pass promotion gates.\n"
+        f"ROC AUC {holdout['roc_auc']:.3f}. {holdout_verdict}\n"
         if holdout is not None
         else "## Untouched holdout verdict\n\nNo holdout was configured.\n"
     )
@@ -816,6 +1097,14 @@ def _markdown_factor_report(
 - Target/stop ratio: {summary["reward_risk"]:.3f}
 - Maximum holding: {summary["maximum_holding_hours"]} hours
 - Minimum expected net R: {summary["minimum_expected_net_r"]:.3f}
+- Factor hypotheses tested per fold: {summary["factor_hypotheses_tested"]}
+- Budget-generated DSL factors: {summary["generated_factor_count"]}
+- Point-in-time data SHA-256: `{summary["point_in_time_fingerprint_sha256"] or "disabled"}`
+- Evidence tier: `{summary["data_readiness"]["tier"]}`
+- Broker-data promotion ready: `{summary["data_readiness"]["broker_ready"]}`
+- Minimum history: {summary["data_readiness"]["minimum_history_years"]:.2f} years
+- Minimum historical swap coverage: {summary["data_readiness"]["minimum_swap_coverage"]:.2%}
+- Carry coverage: {summary["data_readiness"]["carry_coverage"]:.2%}
 - Data SHA-256: `{manifest["data_fingerprint_sha256"]}`
 
 Signals use factors known at a bar close and enter no earlier than the next bar open. Training rows
@@ -835,7 +1124,15 @@ Benjamini-Hochberg false-discovery-rate correction. The stability table excludes
 
 Compounded development-fold return: {summary["compounded_return"]:.2%}; positive folds:
 {summary["positive_folds"]}/{summary["folds"]}; total trades: {summary["total_trades"]}; folds with
-no FDR-eligible factor: {summary["no_eligible_factor_folds"]}/{summary["folds"]}.
+no selected factor: {summary["no_eligible_factor_folds"]}/{summary["folds"]}.
+
+## Cost stress
+
+| Cost multiplier | Compounded return | Positive folds | Minimum fold PF | Trades |
+|---:|---:|---:|---:|---:|
+{stress_rows}
+
+Promotion verdict: `{summary["verdict"]}`.
 
 {holdout_section}
 

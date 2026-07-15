@@ -18,8 +18,9 @@ from .config import SystemConfig
 from .data import YahooFXProvider, load_from_config, save_csv_directory
 from .engine import BacktestEngine
 from .factor_config import FactorMiningConfig
-from .factor_research import run_factor_mining, write_factor_artifacts
+from .factor_research import audit_factor_data, run_factor_mining, write_factor_artifacts
 from .planner import create_paper_plan
+from .point_in_time import load_point_in_time_data
 from .reporting import write_backtest_artifacts
 from .research import generate_ensemble_signals, screen_strategies, walk_forward
 
@@ -79,10 +80,14 @@ def factor_download(
     output: Annotated[Path | None, typer.Option("--output", "-o")] = None,
 ) -> None:
     parsed = FactorMiningConfig.from_yaml(config)
-    console.print("Downloading long-horizon public FX data for factor research…")
-    data = YahooFXProvider.download(
-        parsed.data.symbols, parsed.data.start, parsed.data.end, parsed.data.interval
-    )
+    if parsed.data.provider == "oanda":
+        console.print("Downloading OANDA fxPractice bid/ask candles for factor research…")
+        data = load_from_config(parsed.data)
+    else:
+        console.print("Downloading long-horizon public FX data for factor research…")
+        data = YahooFXProvider.download(
+            parsed.data.symbols, parsed.data.start, parsed.data.end, parsed.data.interval
+        )
     destination = output or parsed.data.directory
     save_csv_directory(data, destination)
     console.print(f"[green]Saved[/green] {len(data)} symbols to {destination}")
@@ -95,7 +100,8 @@ def factor_mine(
 ) -> None:
     parsed = FactorMiningConfig.from_yaml(config)
     data = load_from_config(parsed.data)
-    mining = run_factor_mining(data, parsed)
+    point_in_time = load_point_in_time_data(parsed.point_in_time, data)
+    mining = run_factor_mining(data, parsed, point_in_time)
     destination = write_factor_artifacts(mining, data, parsed, output)
     table = Table(title="Purged walk-forward multi-factor results")
     for column in ("Fold", "Kind", "Test", "AUC", "Trades", "Return", "PF", "Max DD"):
@@ -117,6 +123,30 @@ def factor_mine(
         f"positive folds: {mining.summary['positive_folds']}/{mining.summary['folds']}"
     )
     console.print(f"Artifacts: [cyan]{destination.resolve()}[/cyan]")
+
+
+@app.command("factor-data-audit")
+def factor_data_audit(
+    config: Annotated[Path, typer.Option("--config", "-c")] = Path(
+        "configs/factors_broker_carry_dev.yaml"
+    ),
+    output: Annotated[Path, typer.Option("--output", "-o")] = Path(
+        "outputs/factor_data_audit.json"
+    ),
+) -> None:
+    parsed = FactorMiningConfig.from_yaml(config)
+    data = load_from_config(parsed.data)
+    point_in_time = load_point_in_time_data(parsed.point_in_time, data)
+    audit = audit_factor_data(data, parsed, point_in_time)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(json.dumps(audit, indent=2, allow_nan=False), encoding="utf-8")
+    status = "green" if audit["broker_ready"] else "yellow"
+    console.print(
+        f"[{status}]broker_ready={audit['broker_ready']}[/{status}]; "
+        f"tier={audit['tier']}; history={audit['minimum_history_years']:.2f}y; "
+        f"swap={audit['minimum_swap_coverage']:.1%}; carry={audit['carry_coverage']:.1%}"
+    )
+    console.print(f"Audit: [cyan]{output.resolve()}[/cyan]")
 
 
 @app.command()

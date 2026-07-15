@@ -13,6 +13,8 @@
   全货币图强弱反转、滚动 Engle–Granger 协整价差。
 - 60+ 个价格、波动、结构、日历、横截面和多货币图因子；三重障碍标签、训练内概率校准、
   purged walk-forward、成对 block bootstrap、FDR 校正、动态成本期望 R 和一次性 holdout。
+- Broker bid/ask OHLC、历史 spread/swap、point-in-time 利率/forward points、carry 因子，
+  以及带搜索预算和完整谱系的受约束因子 DSL。
 - 信号只用已收盘 K 线，最早在下一根 K 线开盘执行，避免 look-ahead。
 - 每个策略目标/止损比低于 0.85；全局硬上限 0.85；最长持仓硬上限 168 小时。
 - 共享币种敞口：同时持有 EURUSD 与 GBPUSD 时，美元风险会合并，而不是当作独立资产。
@@ -37,6 +39,10 @@ uv run fxtrade factor-download -c configs/factors_daily.yaml
 uv run fxtrade factor-mine -c configs/factors_daily.yaml
 # 只在旧 holdout 之前运行第二轮严格 FDR 开发研究
 uv run fxtrade factor-mine -c configs/factors_daily_round2_dev.yaml
+# 无外部凭证的 bid/ask + carry + DSL 软件验收
+uv run fxtrade factor-mine -c configs/factors_carry_synthetic.yaml
+# 实盘级数据准备完成后先审计，再进行开发研究
+uv run fxtrade factor-data-audit -c configs/factors_broker_carry_dev.yaml
 ```
 
 示例回测使用合成数据，只验证系统行为，不能验证策略收益。产物写入 `outputs/`：
@@ -101,3 +107,4 @@ uv run fxtrade oanda-practice-submit --plan outputs/paper_plan.json --confirm-pr
 - [2026-07-15 实证筛选记录](docs/EMPIRICAL_SCREENING_2026-07-15_ZH.md)
 - [多因子挖掘系统与最终实证](docs/MULTIFACTOR_RESEARCH_ZH.md)
 - [第二轮成对因子挖掘记录](docs/FACTOR_ROUND2_2026-07-15_ZH.md)
+- [Broker 报价、Carry 与受约束因子挖掘](docs/BROKER_CARRY_DISCOVERY_ZH.md)

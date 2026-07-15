@@ -1,18 +1,38 @@
 from __future__ import annotations
 
 import json
+import os
 import warnings
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import timedelta
 from pathlib import Path
 
+import httpx
 import numpy as np
 import pandas as pd
 
 from .models import CurrencyPair, utc_timestamp
 
 REQUIRED_COLUMNS = ("open", "high", "low", "close")
+QUOTE_COLUMNS = tuple(
+    f"{side}_{field}" for side in ("bid", "ask") for field in REQUIRED_COLUMNS
+)
+
+
+def has_bid_ask(frame: pd.DataFrame) -> bool:
+    return set(QUOTE_COLUMNS).issubset(frame.columns)
+
+
+def _invalid_ohlc(frame: pd.DataFrame, prefix: str = "") -> pd.Series:
+    columns = [f"{prefix}{column}" for column in REQUIRED_COLUMNS]
+    open_, high, low, close = (frame[column] for column in columns)
+    return (
+        (low > pd.concat([open_, close], axis=1).min(axis=1))
+        | (high < pd.concat([open_, close], axis=1).max(axis=1))
+        | (high < low)
+        | (frame[columns] <= 0).any(axis=1)
+    )
 
 
 def validate_bars(
@@ -22,6 +42,16 @@ def validate_bars(
 ) -> pd.DataFrame:
     result = frame.copy()
     result.columns = [str(column).lower().replace(" ", "_") for column in result.columns]
+    present_quote_columns = set(QUOTE_COLUMNS) & set(result)
+    if present_quote_columns and present_quote_columns != set(QUOTE_COLUMNS):
+        missing_quotes = sorted(set(QUOTE_COLUMNS) - set(result))
+        raise ValueError(f"{symbol}: incomplete bid/ask OHLC columns {missing_quotes}")
+    quote_mode = bool(present_quote_columns)
+    if quote_mode:
+        for column in QUOTE_COLUMNS:
+            result[column] = pd.to_numeric(result[column], errors="coerce")
+        for field in REQUIRED_COLUMNS:
+            result[field] = (result[f"bid_{field}"] + result[f"ask_{field}"]) / 2
     missing = set(REQUIRED_COLUMNS) - set(result.columns)
     if missing:
         raise ValueError(f"{symbol}: missing OHLC columns {sorted(missing)}")
@@ -44,12 +74,12 @@ def validate_bars(
         result["volume"] = 0.0
     result["volume"] = pd.to_numeric(result["volume"], errors="coerce").fillna(0.0)
     result = result.dropna(subset=list(REQUIRED_COLUMNS))
-    invalid = (
-        (result["low"] > result[["open", "close"]].min(axis=1))
-        | (result["high"] < result[["open", "close"]].max(axis=1))
-        | (result["high"] < result["low"])
-        | (result[list(REQUIRED_COLUMNS)] <= 0).any(axis=1)
-    )
+    invalid = _invalid_ohlc(result)
+    if quote_mode:
+        crossed = pd.Series(False, index=result.index)
+        for field in REQUIRED_COLUMNS:
+            crossed |= result[f"ask_{field}"] < result[f"bid_{field}"]
+        invalid |= _invalid_ohlc(result, "bid_") | _invalid_ohlc(result, "ask_") | crossed
     if invalid.any():
         invalid_count = int(invalid.sum())
         if invalid_ohlc == "drop":
@@ -66,6 +96,13 @@ def validate_bars(
     if len(result) < 2:
         raise ValueError(f"{symbol}: not enough valid bars")
     result.attrs["dropped_invalid_ohlc"] = invalid_count
+    result.attrs["price_mode"] = "bid_ask" if quote_mode else "mid"
+    if quote_mode:
+        result["spread_open"] = result["ask_open"] - result["bid_open"]
+        result["spread_close"] = result["ask_close"] - result["bid_close"]
+    for column in ("swap_long_pips", "swap_short_pips"):
+        if column in result:
+            result[column] = pd.to_numeric(result[column], errors="coerce")
     return result
 
 
@@ -100,11 +137,64 @@ def save_csv_directory(data: Mapping[str, pd.DataFrame], directory: str | Path) 
                 "start": frame.index[0].isoformat(),
                 "end": frame.index[-1].isoformat(),
                 "dropped_invalid_ohlc": int(frame.attrs.get("dropped_invalid_ohlc", 0)),
+                "price_mode": "bid_ask" if has_bid_ask(frame) else "mid",
+                "mean_spread_price": (
+                    float(frame["spread_close"].mean()) if has_bid_ask(frame) else None
+                ),
+                "historical_swap": {
+                    "long": "swap_long_pips" in frame,
+                    "short": "swap_short_pips" in frame,
+                },
             }
             for symbol, frame in data.items()
         }
     }
     (root / "_data_manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+
+
+def attach_historical_swaps(
+    data: Mapping[str, pd.DataFrame],
+    directory: str | Path,
+    maximum_staleness_days: int = 14,
+) -> dict[str, pd.DataFrame]:
+    """As-of join historical financing known by each bar; future rows are never backfilled."""
+    root = Path(directory)
+    output: dict[str, pd.DataFrame] = {}
+    for symbol, frame in data.items():
+        candidates = [root / f"{symbol}.csv", root / f"{symbol.lower()}.csv"]
+        path = next((candidate for candidate in candidates if candidate.exists()), None)
+        if path is None:
+            raise FileNotFoundError(f"No historical swap file found for {symbol} in {root}")
+        swaps = pd.read_csv(path)
+        swaps.columns = [str(column).strip().lower() for column in swaps.columns]
+        required = {"available_time", "swap_long_pips", "swap_short_pips"}
+        missing = required - set(swaps)
+        if missing:
+            raise ValueError(f"{symbol}: historical swap file is missing {sorted(missing)}")
+        swaps["available_time"] = pd.to_datetime(swaps["available_time"], utc=True, errors="coerce")
+        if swaps["available_time"].isna().any():
+            raise ValueError(f"{symbol}: historical swap file contains invalid available_time")
+        for column in ("swap_long_pips", "swap_short_pips"):
+            swaps[column] = pd.to_numeric(swaps[column], errors="coerce")
+            if swaps[column].isna().any() or not np.isfinite(swaps[column]).all():
+                raise ValueError(f"{symbol}: historical swap file contains invalid {column}")
+        if swaps.duplicated("available_time").any():
+            raise ValueError(f"{symbol}: duplicate historical swap available_time")
+        left = pd.DataFrame({"timestamp": frame.index}).sort_values("timestamp")
+        merged = pd.merge_asof(
+            left,
+            swaps.sort_values("available_time"),
+            left_on="timestamp",
+            right_on="available_time",
+            direction="backward",
+            tolerance=timedelta(days=maximum_staleness_days),
+            allow_exact_matches=True,
+        ).set_index("timestamp")
+        enriched = frame.copy()
+        enriched["swap_long_pips"] = merged["swap_long_pips"].reindex(enriched.index)
+        enriched["swap_short_pips"] = merged["swap_short_pips"].reindex(enriched.index)
+        output[symbol] = enriched
+    return output
 
 
 class YahooFXProvider:
@@ -168,6 +258,107 @@ class YahooFXProvider:
         return result
 
 
+class OandaCandleProvider:
+    """Historical practice-domain bid/ask candles; live OANDA domains are forbidden."""
+
+    PRACTICE_URL = "https://api-fxpractice.oanda.com"
+
+    @classmethod
+    def download(
+        cls,
+        symbols: list[str],
+        start: str,
+        end: str | None,
+        interval: str,
+        token: str,
+        *,
+        base_url: str = PRACTICE_URL,
+        transport: httpx.BaseTransport | None = None,
+    ) -> dict[str, pd.DataFrame]:
+        if base_url.rstrip("/") != cls.PRACTICE_URL:
+            raise ValueError("OANDA historical data is restricted to the fxPractice domain")
+        if not token:
+            raise ValueError("OANDA_PRACTICE_TOKEN is required for OANDA historical data")
+        granularity = {"1h": "H1", "4h": "H4", "1d": "D"}[interval]
+        start_time = pd.Timestamp(start)
+        start_time = (
+            start_time.tz_localize("UTC")
+            if start_time.tzinfo is None
+            else start_time.tz_convert("UTC")
+        )
+        end_time = pd.Timestamp(end) if end is not None else pd.Timestamp.now(tz="UTC")
+        end_time = (
+            end_time.tz_localize("UTC")
+            if end_time.tzinfo is None
+            else end_time.tz_convert("UTC")
+        )
+        headers = {"Authorization": f"Bearer {token}"}
+        result: dict[str, pd.DataFrame] = {}
+        with httpx.Client(
+            base_url=base_url,
+            headers=headers,
+            transport=transport,
+            timeout=30,
+        ) as client:
+            for raw_symbol in symbols:
+                pair = CurrencyPair.parse(raw_symbol)
+                instrument = f"{pair.base}_{pair.quote}"
+                cursor = start_time
+                first_page = True
+                records: list[dict[str, object]] = []
+                while cursor < end_time:
+                    response = client.get(
+                        f"/v3/instruments/{instrument}/candles",
+                        params={
+                            "price": "BA",
+                            "granularity": granularity,
+                            "count": 5000,
+                            "from": cursor.isoformat(),
+                            "includeFirst": str(first_page).lower(),
+                        },
+                    )
+                    response.raise_for_status()
+                    candles = response.json().get("candles", [])
+                    if not candles:
+                        break
+                    latest: pd.Timestamp | None = None
+                    for candle in candles:
+                        timestamp = pd.Timestamp(candle["time"])
+                        timestamp = (
+                            timestamp.tz_localize("UTC")
+                            if timestamp.tzinfo is None
+                            else timestamp.tz_convert("UTC")
+                        )
+                        latest = timestamp
+                        if not candle.get("complete", False) or timestamp >= end_time:
+                            continue
+                        bid = candle.get("bid")
+                        ask = candle.get("ask")
+                        if bid is None or ask is None:
+                            raise RuntimeError("OANDA BA candle response omitted bid or ask prices")
+                        row: dict[str, object] = {
+                            "timestamp": timestamp,
+                            "volume": float(candle.get("volume", 0)),
+                        }
+                        for field, key in zip(REQUIRED_COLUMNS, ("o", "h", "l", "c"), strict=True):
+                            row[f"bid_{field}"] = float(bid[key])
+                            row[f"ask_{field}"] = float(ask[key])
+                        records.append(row)
+                    if latest is None or latest <= cursor:
+                        break
+                    cursor = latest
+                    first_page = False
+                    if len(candles) < 5000:
+                        break
+                if not records:
+                    raise RuntimeError(
+                        f"OANDA returned no complete bid/ask candles for {pair.symbol}"
+                    )
+                frame = pd.DataFrame(records).set_index("timestamp")
+                result[pair.symbol] = validate_bars(frame, pair.symbol)
+        return result
+
+
 def drop_incomplete_bars(
     frame: pd.DataFrame,
     interval: str,
@@ -199,6 +390,7 @@ class SyntheticFXProvider:
         bars: int = 3000,
         interval: str = "4h",
         start: str = "2020-01-01",
+        price_mode: str = "mid",
     ) -> dict[str, pd.DataFrame]:
         rng = np.random.default_rng(self.seed)
         pairs = [CurrencyPair.parse(value) for value in symbols]
@@ -264,6 +456,16 @@ class SyntheticFXProvider:
                 },
                 index=index,
             )
+            if price_mode == "bid_ask":
+                spread_pips = np.maximum(0.25, rng.lognormal(mean=-0.1, sigma=0.35, size=bars))
+                half_spread = spread_pips * pair.pip_size / 2
+                for field in REQUIRED_COLUMNS:
+                    frame[f"bid_{field}"] = frame[field] - half_spread
+                    frame[f"ask_{field}"] = frame[field] + half_spread
+                frame["swap_long_pips"] = -0.15 + 0.05 * np.sin(np.arange(bars) / 50)
+                frame["swap_short_pips"] = -0.10 - 0.05 * np.sin(np.arange(bars) / 50)
+            elif price_mode != "mid":
+                raise ValueError(f"Unsupported synthetic price_mode: {price_mode}")
             output[pair.symbol] = validate_bars(frame, pair.symbol)
         return output
 
@@ -276,10 +478,29 @@ def load_from_config(config: object) -> dict[str, pd.DataFrame]:
         data = YahooFXProvider.download(config.symbols, config.start, config.end, config.interval)
     elif provider == "synthetic":
         data = SyntheticFXProvider(seed=config.seed).generate(
-            config.symbols, config.synthetic_bars, config.interval, config.start
+            config.symbols,
+            config.synthetic_bars,
+            config.interval,
+            config.start,
+            config.price_mode,
+        )
+    elif provider == "oanda":
+        data = OandaCandleProvider.download(
+            config.symbols,
+            config.start,
+            config.end,
+            config.interval,
+            os.environ.get("OANDA_PRACTICE_TOKEN", ""),
         )
     else:
         raise ValueError(f"Unsupported provider: {provider}")
+
+    if config.swap_directory is not None:
+        data = attach_historical_swaps(
+            data,
+            config.swap_directory,
+            config.maximum_swap_staleness_days,
+        )
 
     start = pd.Timestamp(config.start)
     start = start.tz_localize("UTC") if start.tzinfo is None else start.tz_convert("UTC")
@@ -288,6 +509,10 @@ def load_from_config(config: object) -> dict[str, pd.DataFrame]:
         end = end.tz_localize("UTC") if end.tzinfo is None else end.tz_convert("UTC")
     sliced: dict[str, pd.DataFrame] = {}
     for symbol, frame in data.items():
+        if config.price_mode == "bid_ask" and not has_bid_ask(frame):
+            raise ValueError(
+                f"{symbol}: data.price_mode=bid_ask requires complete bid/ask OHLC columns"
+            )
         mask = frame.index >= start
         if end is not None:
             mask &= frame.index < end
