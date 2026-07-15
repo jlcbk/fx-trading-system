@@ -66,6 +66,46 @@ def _definitions() -> list[FactorDefinition]:
         )
     add("return_skew_24", "distribution", True, "Rolling 24-bar return skew")
     add("return_kurtosis_24", "distribution", False, "Rolling 24-bar excess kurtosis")
+    add(
+        "semivariance_asymmetry_24",
+        "distribution",
+        True,
+        "Downside versus upside realized semivariance over 24 bars",
+    )
+    add("sign_entropy_24", "distribution", False, "Binary return-sign entropy over 24 bars")
+    add(
+        "variance_ratio_5_60",
+        "regime",
+        False,
+        "Five-bar variance ratio estimated over 60 bars",
+    )
+    add(
+        "parkinson_vol_ratio_20",
+        "volatility",
+        False,
+        "Range-based Parkinson volatility versus close-to-close volatility",
+    )
+    add("close_location_value", "market_structure", True, "Close location within current bar")
+    add("gap_atr", "market_structure", True, "Open gap from prior close normalized by ATR")
+    add(
+        "breakout_distance_20",
+        "market_structure",
+        True,
+        "Distance beyond the prior 20-bar channel normalized by ATR",
+    )
+    for window in (20, 60):
+        add(
+            f"trend_tstat_{window}",
+            "trend",
+            True,
+            f"T-statistic of the log-price trend over {window} bars",
+        )
+    add(
+        "cross_sectional_momentum_12",
+        "cross_sectional",
+        True,
+        "Cross-pair percentile rank of 12-bar momentum",
+    )
     add("hour_sin", "calendar", False, "Cyclical UTC hour encoding")
     add("hour_cos", "calendar", False, "Cyclical UTC hour encoding")
     add("weekday_sin", "calendar", False, "Cyclical weekday encoding")
@@ -95,6 +135,18 @@ def _definitions() -> list[FactorDefinition]:
             True,
             f"Pair return unexplained by the currency graph over {window} bars",
         )
+    add(
+        "currency_dispersion_12",
+        "currency_graph",
+        False,
+        "Cross-currency dispersion of gauge-invariant graph strengths",
+    )
+    add(
+        "pair_residual_z_12",
+        "relative_value",
+        True,
+        "Cross-pair standardized 12-bar currency-graph residual",
+    )
     return result
 
 
@@ -121,6 +173,26 @@ def _efficiency(close: pd.Series, window: int) -> pd.Series:
 
 def _autocorrelation(returns: pd.Series, window: int) -> pd.Series:
     return returns.rolling(window, min_periods=window).corr(returns.shift(1))
+
+
+def _trend_tstat(log_close: pd.Series, window: int) -> pd.Series:
+    x = np.arange(window, dtype=float)
+    centered_x = x - x.mean()
+    x_sum_squares = float(centered_x @ centered_x)
+
+    def calculate(values: np.ndarray) -> float:
+        if not np.isfinite(values).all():
+            return float("nan")
+        centered_y = values - values.mean()
+        slope = float(centered_x @ centered_y) / x_sum_squares
+        residuals = centered_y - slope * centered_x
+        residual_variance = float(residuals @ residuals) / (window - 2)
+        if residual_variance <= 1e-20:
+            return 0.0
+        standard_error = np.sqrt(residual_variance / x_sum_squares)
+        return float(np.clip(slope / standard_error, -25.0, 25.0))
+
+    return log_close.rolling(window, min_periods=window).apply(calculate, raw=True)
 
 
 def _currency_graph(
@@ -156,6 +228,15 @@ def _currency_graph(
             columns=symbols,
         )
         residual_frame = pd.DataFrame(residuals, index=pair_returns.index, columns=symbols)
+        currency_dispersion = strength_frame.std(axis=1, ddof=0)
+        pair_scale = pair_returns.std(axis=1, ddof=0)
+        residual_scale = residual_frame.std(axis=1, ddof=0)
+        # A graph-consistent cross set leaves only floating-point residuals. Do not turn that
+        # numerical noise into an apparently unit-scale factor through standardization.
+        residual_scale = residual_scale.where(
+            residual_scale > np.maximum(1e-12, pair_scale * 1e-6)
+        )
+        residual_z = residual_frame.div(residual_scale, axis=0)
         for symbol, pair in zip(symbols, pairs, strict=True):
             target_index = data[symbol].index
             output[symbol][f"base_strength_{window}"] = strength_frame[pair.base].reindex(
@@ -168,6 +249,11 @@ def _currency_graph(
                 target_index
             )
             output[symbol][f"pair_residual_{window}"] = residual_frame[symbol].reindex(target_index)
+            if window == 12:
+                output[symbol]["currency_dispersion_12"] = currency_dispersion.reindex(
+                    target_index
+                )
+                output[symbol]["pair_residual_z_12"] = residual_z[symbol].reindex(target_index)
     return output
 
 
@@ -225,6 +311,45 @@ def build_factor_panel(data: Mapping[str, pd.DataFrame]) -> pd.DataFrame:
             factors[f"autocorrelation_{window}"] = _autocorrelation(returns, window)
         factors["return_skew_24"] = returns.rolling(24, min_periods=24).skew()
         factors["return_kurtosis_24"] = returns.rolling(24, min_periods=24).kurt()
+        upside_variance = returns.clip(lower=0).pow(2).rolling(24, min_periods=24).mean()
+        downside_variance = returns.clip(upper=0).pow(2).rolling(24, min_periods=24).mean()
+        upside_volatility = np.sqrt(upside_variance)
+        downside_volatility = np.sqrt(downside_variance)
+        factors["semivariance_asymmetry_24"] = (downside_volatility - upside_volatility) / (
+            downside_volatility + upside_volatility
+        ).replace(0, np.nan)
+        positive_fraction = returns.gt(0).rolling(24, min_periods=24).mean().clip(1e-12, 1 - 1e-12)
+        factors["sign_entropy_24"] = -(
+            positive_fraction * np.log(positive_fraction)
+            + (1 - positive_fraction) * np.log(1 - positive_fraction)
+        ) / np.log(2)
+        one_bar_variance = returns.rolling(60, min_periods=60).var(ddof=0)
+        five_bar_variance = log_close.diff(5).rolling(60, min_periods=60).var(ddof=0)
+        factors["variance_ratio_5_60"] = five_bar_variance / (
+            5 * one_bar_variance.replace(0, np.nan)
+        )
+        parkinson_volatility = np.sqrt(
+            np.log(frame["high"] / frame["low"])
+            .pow(2)
+            .rolling(20, min_periods=20)
+            .mean()
+            / (4 * np.log(2))
+        )
+        close_volatility_20 = returns.rolling(20, min_periods=20).std(ddof=0)
+        factors["parkinson_vol_ratio_20"] = parkinson_volatility / close_volatility_20.replace(
+            0, np.nan
+        )
+        bar_range = (frame["high"] - frame["low"]).replace(0, np.nan)
+        factors["close_location_value"] = (
+            2 * close - frame["high"] - frame["low"]
+        ) / bar_range
+        factors["gap_atr"] = (frame["open"] - close.shift(1)) / current_atr.replace(0, np.nan)
+        prior_high_20 = frame["high"].shift(1).rolling(20, min_periods=20).max()
+        prior_low_20 = frame["low"].shift(1).rolling(20, min_periods=20).min()
+        breakout = (close - prior_high_20).clip(lower=0) + (close - prior_low_20).clip(upper=0)
+        factors["breakout_distance_20"] = breakout / current_atr.replace(0, np.nan)
+        for window in (20, 60):
+            factors[f"trend_tstat_{window}"] = _trend_tstat(log_close, window)
         factors["hour_sin"] = np.sin(2 * np.pi * frame.index.hour / 24)
         factors["hour_cos"] = np.cos(2 * np.pi * frame.index.hour / 24)
         factors["weekday_sin"] = np.sin(2 * np.pi * frame.index.dayofweek / 5)
@@ -236,6 +361,13 @@ def build_factor_panel(data: Mapping[str, pd.DataFrame]) -> pd.DataFrame:
         factors.index.name = "_feature_time"
         panels.append(factors.reset_index())
     panel = pd.concat(panels, ignore_index=True)
+    panel["cross_sectional_momentum_12"] = (
+        2
+        * panel.groupby("_feature_time")["momentum_12"].rank(
+            method="average", pct=True, na_option="keep"
+        )
+        - 1
+    )
     expected = set(factor_columns())
     missing = expected - set(panel)
     if missing:

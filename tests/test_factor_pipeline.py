@@ -8,7 +8,12 @@ from conftest import make_bars
 from fx_system.config import CostConfig, DataConfig, RiskConfig
 from fx_system.data import SyntheticFXProvider
 from fx_system.factor_config import FactorMiningConfig, FactorSettings
-from fx_system.factor_research import _fold_boundaries, _holdout_boundary, run_factor_mining
+from fx_system.factor_research import (
+    _fold_boundaries,
+    _holdout_boundary,
+    factor_statistics,
+    run_factor_mining,
+)
 from fx_system.factors import build_factor_panel, factor_catalog, factor_columns
 from fx_system.labels import _label_symbol, build_directional_dataset
 from fx_system.rates import FXRateGraph
@@ -16,13 +21,14 @@ from fx_system.rates import FXRateGraph
 
 def test_factor_catalog_is_implemented_and_uses_multiple_families() -> None:
     catalog = factor_catalog()
-    assert len(catalog) >= 45
+    assert len(catalog) >= 55
     assert set(catalog["family"]) >= {
         "momentum",
         "reversal",
         "volatility",
         "currency_graph",
         "relative_value",
+        "cross_sectional",
     }
     assert catalog["name"].is_unique
 
@@ -43,6 +49,34 @@ def test_factor_panel_has_no_future_dependency() -> None:
         rtol=1e-12,
         atol=1e-12,
     )
+
+
+def test_factor_significance_clusters_mirrored_rows_and_controls_fdr() -> None:
+    generator = np.random.default_rng(105)
+    timestamps = pd.date_range("2020-01-01", periods=240, freq="1D", tz="UTC")
+    rows_per_time = 8
+    repeated_times = np.repeat(timestamps, rows_per_time)
+    time_regime = np.repeat(np.arange(len(timestamps)) % 2, rows_per_time)
+    frame = pd.DataFrame(
+        generator.normal(size=(len(repeated_times), len(factor_columns()))),
+        columns=factor_columns(),
+    )
+    frame["_feature_time"] = repeated_times
+    frame["_label"] = time_regime
+    frame["momentum_1"] = time_regime
+    statistics = factor_statistics(
+        frame,
+        FactorSettings(
+            bootstrap_samples=1000,
+            bootstrap_block_bars=10,
+            factor_fdr_level=0.10,
+        ),
+    ).set_index("factor")
+    strong = statistics.loc["momentum_1"]
+    assert strong["effective_time_blocks"] == 24
+    assert strong["bootstrap_p_value"] < 0.01
+    assert strong["fdr_q_value"] < 0.10
+    assert bool(strong["fdr_significant"])
 
 
 def test_currency_graph_residual_detects_inconsistent_cross() -> None:
@@ -220,3 +254,17 @@ def test_small_factor_mining_pipeline_runs_out_of_sample() -> None:
         assert fold.model_metrics["rows"] == settings.test_bars * len(symbols) * 2
         assert fold.model_metrics["calibration_rows"] >= settings.minimum_calibration_samples
         assert {"estimated_cost_r", "expected_net_r"}.issubset(fold.predictions.columns)
+
+    strict_settings = settings.model_copy(
+        update={
+            "bootstrap_samples": 100,
+            "factor_fdr_level": 0.001,
+            "require_fdr_significance": True,
+        }
+    )
+    strict_config = config.model_copy(update={"factor": strict_settings})
+    rejected = run_factor_mining(data, strict_config)
+    assert rejected.summary["no_eligible_factor_folds"] == rejected.summary["folds"]
+    assert rejected.summary["total_trades"] == 0
+    assert all(not fold.selected_features for fold in rejected.folds)
+    assert all(fold.model_metrics["roc_auc"] == 0.5 for fold in rejected.folds)

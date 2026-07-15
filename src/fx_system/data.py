@@ -271,11 +271,31 @@ class SyntheticFXProvider:
 def load_from_config(config: object) -> dict[str, pd.DataFrame]:
     provider = config.provider
     if provider == "csv":
-        return load_csv_directory(config.directory, config.symbols)
-    if provider == "yahoo":
-        return YahooFXProvider.download(config.symbols, config.start, config.end, config.interval)
-    if provider == "synthetic":
-        return SyntheticFXProvider(seed=config.seed).generate(
+        data = load_csv_directory(config.directory, config.symbols)
+    elif provider == "yahoo":
+        data = YahooFXProvider.download(config.symbols, config.start, config.end, config.interval)
+    elif provider == "synthetic":
+        data = SyntheticFXProvider(seed=config.seed).generate(
             config.symbols, config.synthetic_bars, config.interval, config.start
         )
-    raise ValueError(f"Unsupported provider: {provider}")
+    else:
+        raise ValueError(f"Unsupported provider: {provider}")
+
+    start = pd.Timestamp(config.start)
+    start = start.tz_localize("UTC") if start.tzinfo is None else start.tz_convert("UTC")
+    end = pd.Timestamp(config.end) if config.end is not None else None
+    if end is not None:
+        end = end.tz_localize("UTC") if end.tzinfo is None else end.tz_convert("UTC")
+    sliced: dict[str, pd.DataFrame] = {}
+    for symbol, frame in data.items():
+        mask = frame.index >= start
+        if end is not None:
+            mask &= frame.index < end
+        selected = frame.loc[mask].copy()
+        if len(selected) < 2:
+            raise ValueError(
+                f"{symbol}: fewer than two bars remain in requested range "
+                f"[{config.start}, {config.end or 'latest'})"
+            )
+        sliced[symbol] = selected
+    return sliced

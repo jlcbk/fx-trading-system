@@ -3,8 +3,14 @@ from __future__ import annotations
 import pandas as pd
 import pytest
 
-from fx_system.config import RiskConfig, SystemConfig
-from fx_system.data import SyntheticFXProvider, drop_incomplete_bars, validate_bars
+from fx_system.config import DataConfig, RiskConfig, SystemConfig
+from fx_system.data import (
+    SyntheticFXProvider,
+    drop_incomplete_bars,
+    load_from_config,
+    save_csv_directory,
+    validate_bars,
+)
 from fx_system.models import CurrencyPair
 
 
@@ -73,3 +79,19 @@ def test_live_provider_drops_still_forming_bar() -> None:
     frame = pd.DataFrame({"close": [1.0, 1.1, 1.2]}, index=index)
     filtered = drop_incomplete_bars(frame, "4h", pd.Timestamp("2026-01-01T09:00:00Z"))
     assert list(filtered.index) == list(index[:2])
+
+
+def test_csv_provider_honors_exclusive_research_end_date(tmp_path) -> None:
+    data = SyntheticFXProvider(seed=8).generate(["EURUSD"], bars=20, interval="1d")
+    save_csv_directory(data, tmp_path)
+    config = DataConfig(
+        provider="csv",
+        directory=tmp_path,
+        symbols=["EURUSD"],
+        interval="1d",
+        start="2020-01-03",
+        end="2020-01-15",
+    )
+    loaded = load_from_config(config)["EURUSD"]
+    assert loaded.index.min() >= pd.Timestamp("2020-01-03", tz="UTC")
+    assert loaded.index.max() < pd.Timestamp("2020-01-15", tz="UTC")

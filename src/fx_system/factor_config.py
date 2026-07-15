@@ -27,6 +27,10 @@ class FactorSettings(BaseModel):
     max_features: int = Field(32, ge=5, le=100)
     maximum_feature_correlation: float = Field(0.90, ge=0.5, le=0.999)
     minimum_feature_coverage: float = Field(0.80, ge=0.5, le=1)
+    bootstrap_samples: int = Field(500, ge=100, le=10_000)
+    bootstrap_block_bars: int = Field(20, ge=2, le=250)
+    factor_fdr_level: float = Field(0.10, gt=0, le=0.50)
+    require_fdr_significance: bool = False
     model_c: float = Field(0.10, gt=0, le=100)
     model_l1_ratio: float = Field(0.15, ge=0, le=1)
     calibration_fraction: float = Field(0.20, ge=0.10, le=0.40)

@@ -19,7 +19,7 @@ Expected net R
 
 ## 因子库
 
-当前实现约 50 个 close-of-bar 因子：
+当前实现 60+ 个 close-of-bar 因子：
 
 - 动量：1/3/6/12/24 bar 收益。
 - 反转：10/20/60 bar z-score、RSI。
@@ -27,6 +27,8 @@ Expected net R
 - 波动：多周期 realized volatility、波动比、ATR 百分比、range expansion。
 - 结构：通道位置、实体、上下影线平衡。
 - 分布与状态：偏度、峰度、收益自相关。
+- 第二轮路径与横截面：趋势 t-stat、方差比、符号熵、半方差不对称、Parkinson 波动率、
+  K 线收盘位置、跳空、前通道突破距离、横截面动量和货币强度离散度。
 - 日历：UTC 小时与星期的周期编码。
 - 多货币图：base/quote currency strength、货币图拟合收益和 pair residual。
 
@@ -72,8 +74,11 @@ quote strength`。没有闭环的树状货币对集合不能识别 residual，�
 较稳定的研究候选包括 `weekday_cos`、`return_skew_24`、`efficiency_12/24` 和部分货币图
 强度因子。它们只能进入下一轮 broker bid/ask 数据研究，不能单独作为策略上线。
 
-当前 AUC、IC 和交易数没有把同一时间/品种的 long/short 视为统计独立样本来构造置信区间；
-下一轮显著性检验必须按时间块做 block bootstrap，并进行多重假设校正。
+第二轮已经把同一时间/品种的 long/short 合并成一个独立观察：方向因子检验 long/short
+realized R 之差，状态因子检验两方向 realized R 的均值；随后按时间做 moving-block bootstrap
+并进行 Benjamini–Hochberg FDR 校正。严格 FDR 10% 后，4 个开发折均无合格因子，因此空模型
+产生 0 笔交易，结论仍为拒绝。详见
+[第二轮成对因子挖掘记录](FACTOR_ROUND2_2026-07-15_ZH.md)。
 
 ## 运行
 
