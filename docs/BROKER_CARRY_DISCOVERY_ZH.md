@@ -130,6 +130,8 @@ uv run fxtrade factor-mine -c configs/factors_broker_carry_dev.yaml
 - `oos_factor_statistics_by_fold.csv`：paired OOS IC、block-bootstrap p 和 FDR q；
 - `cost_stress_by_fold.csv`：1x、1.5x、2x 成本结果；
 - `factor_manifest.json`：市场数据哈希、PIT 数据哈希、搜索预算和最终 verdict。
+- `frozen_model_status.json`：拒绝时说明原因；只有开发门槛通过才生成带 SHA-256 的
+  `frozen_factor_model.json`。
 
 没有真实外部数据时可运行软件验收：
 
@@ -153,3 +155,22 @@ uv run fxtrade factor-mine -c configs/factors_carry_synthetic.yaml
 
 开发门槛通过但没有新 holdout 时，只能得到 `research_candidate_requires_new_holdout`；
 holdout 也通过时仍只能得到 `research_candidate_requires_paper`。系统不会自动批准真实交易。
+
+## 冻结模型与前向期
+
+只有上述 candidate verdict 才能冻结。模型 JSON 固化：入选因子及谱系、缺失值统计、标准化
+参数、线性系数、Platt 校准器、收益假设、研究截止时间、DSL/因子配置和 contract SHA-256。
+任何字段被修改、因子配置改变或品种集合变化都会拒绝前向运行。
+
+把严格晚于冻结时间的新 bid/ask、swap 和 PIT 数据追加到原目录后执行：
+
+```bash
+uv run fxtrade factor-forward-evaluate \
+  --model outputs/factors_broker_carry_dev/frozen_factor_model.json \
+  -c configs/factors_broker_carry_forward.yaml \
+  -o outputs/factor_forward
+```
+
+该命令不重新筛选、不重新拟合，也不会下单；只生成 forward predictions、signals、trades、
+equity 和 manifest。未达到配置的 90 天时状态为 `collecting`，达到后也只是
+`duration_complete_requires_review`，仍需人工检查并继续累计到计划的 3–6 个月。

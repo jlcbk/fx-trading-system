@@ -527,6 +527,7 @@ def audit_factor_data(
         "point_in_time_fingerprint_sha256": (
             point_in_time.fingerprint() if point_in_time is not None else None
         ),
+        "data_fingerprint_sha256": data_fingerprint(data),
     }
 
 
@@ -985,6 +986,33 @@ def write_factor_artifacts(
     )
     (output / "FACTOR_REPORT.md").write_text(
         _markdown_factor_report(mining, stability, manifest), encoding="utf-8"
+    )
+    candidate_verdicts = {
+        "research_candidate_requires_new_holdout",
+        "research_candidate_requires_paper",
+    }
+    if mining.summary["verdict"] in candidate_verdicts:
+        from .factor_forward import fit_frozen_factor_model
+
+        frozen = fit_frozen_factor_model(mining, config)
+        (output / "frozen_factor_model.json").write_text(
+            json.dumps(frozen, indent=2, allow_nan=False), encoding="utf-8"
+        )
+        freeze_status = {
+            "status": "frozen",
+            "model": "frozen_factor_model.json",
+            "contract_sha256": frozen["contract_sha256"],
+            "forward_not_before": frozen["freeze_available_time"],
+        }
+    else:
+        freeze_status = {
+            "status": "not_frozen",
+            "reason": "research verdict did not pass the frozen-model gate",
+            "verdict": mining.summary["verdict"],
+        }
+    (output / "frozen_model_status.json").write_text(
+        json.dumps(freeze_status, indent=2, default=_json_default, allow_nan=False),
+        encoding="utf-8",
     )
     return output
 

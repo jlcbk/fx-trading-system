@@ -20,6 +20,11 @@ from fx_system.factor_config import (
     PointInTimeConfig,
 )
 from fx_system.factor_dsl import generate_discovery_factors
+from fx_system.factor_forward import (
+    build_forward_predictions,
+    fit_frozen_factor_model,
+    validate_frozen_model,
+)
 from fx_system.factor_research import run_factor_mining, write_factor_artifacts
 from fx_system.factors import FACTOR_DEFINITIONS, build_factor_panel
 from fx_system.labels import _label_symbol
@@ -293,3 +298,31 @@ def test_full_quote_carry_discovery_pipeline_records_stress_and_lineage(tmp_path
     assert (output / "factor_catalog.csv").exists()
     assert (output / "cost_stress_by_fold.csv").exists()
     assert (output / "factor_manifest.json").exists()
+    assert (output / "frozen_model_status.json").exists()
+    assert not (output / "frozen_factor_model.json").exists()
+
+    frozen = fit_frozen_factor_model(mining, config, allow_rejected_for_testing=True)
+    validate_frozen_model(frozen, config)
+    predictions, _ = build_forward_predictions(data, config, frozen, point_in_time)
+    assert not predictions.empty
+    assert predictions["_feature_time"].min() > pd.Timestamp(frozen["freeze_available_time"])
+    assert predictions["probability"].between(0, 1).all()
+    tampered = dict(frozen)
+    tampered["classifier_intercept"] += 1
+    with pytest.raises(ValueError, match="contract hash"):
+        validate_frozen_model(tampered, config)
+
+
+def test_forward_config_changes_only_the_allowed_data_horizon() -> None:
+    development = FactorMiningConfig.from_yaml("configs/factors_broker_carry_dev.yaml")
+    forward = FactorMiningConfig.from_yaml("configs/factors_broker_carry_forward.yaml")
+    assert development.data.end == "2025-09-15"
+    assert forward.data.end is None
+    development_data = development.data.model_dump(mode="json", exclude={"end"})
+    forward_data = forward.data.model_dump(mode="json", exclude={"end"})
+    assert development_data == forward_data
+    assert development.factor == forward.factor
+    assert development.discovery == forward.discovery
+    assert development.point_in_time == forward.point_in_time
+    assert development.costs == forward.costs
+    assert development.risk == forward.risk

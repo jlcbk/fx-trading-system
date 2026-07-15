@@ -94,6 +94,8 @@ class FactorSettings(BaseModel):
     promotion_required_stress_multiplier: float = Field(1.5, ge=1.0, le=5.0)
     minimum_broker_history_years: float = Field(8.0, ge=1.0, le=20.0)
     minimum_auxiliary_coverage: float = Field(0.80, ge=0.5, le=1.0)
+    freeze_minimum_selection_fraction: float = Field(0.75, ge=0.5, le=1.0)
+    forward_minimum_days: int = Field(90, ge=30, le=366)
     model_c: float = Field(0.10, gt=0, le=100)
     model_l1_ratio: float = Field(0.15, ge=0, le=1)
     calibration_fraction: float = Field(0.20, ge=0.10, le=0.40)

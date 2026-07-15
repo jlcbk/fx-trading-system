@@ -11,6 +11,7 @@
 - 成交成本、非 USD quote 动态换算、同 bar 止损优先。
 - 每次运行保存配置、数据范围、SHA-256 和 Git revision。
 - 全部 DSL 假设数量与谱系、paired block bootstrap、FDR、1x/1.5x/2x 成本压力产物。
+- 冻结模型 contract hash、严格 forward 时间边界，以及前向命令无拟合/无选因子保证。
 
 ## 从研究到 practice 前
 

@@ -43,6 +43,10 @@ uv run fxtrade factor-mine -c configs/factors_daily_round2_dev.yaml
 uv run fxtrade factor-mine -c configs/factors_carry_synthetic.yaml
 # 实盘级数据准备完成后先审计，再进行开发研究
 uv run fxtrade factor-data-audit -c configs/factors_broker_carry_dev.yaml
+# 只有 candidate verdict 生成 frozen_factor_model.json 后才能运行
+uv run fxtrade factor-forward-evaluate \
+  --model outputs/factors_broker_carry_dev/frozen_factor_model.json \
+  -c configs/factors_broker_carry_forward.yaml
 ```
 
 示例回测使用合成数据，只验证系统行为，不能验证策略收益。产物写入 `outputs/`：

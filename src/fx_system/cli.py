@@ -12,12 +12,13 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
-from .analytics import calculate_metrics
+from .analytics import calculate_metrics, equity_frame, trades_frame
 from .brokers import OandaPracticeBroker
 from .config import SystemConfig
 from .data import YahooFXProvider, load_from_config, save_csv_directory
 from .engine import BacktestEngine
 from .factor_config import FactorMiningConfig
+from .factor_forward import build_forward_predictions, load_frozen_model
 from .factor_research import audit_factor_data, run_factor_mining, write_factor_artifacts
 from .planner import create_paper_plan
 from .point_in_time import load_point_in_time_data
@@ -147,6 +148,84 @@ def factor_data_audit(
         f"swap={audit['minimum_swap_coverage']:.1%}; carry={audit['carry_coverage']:.1%}"
     )
     console.print(f"Audit: [cyan]{output.resolve()}[/cyan]")
+
+
+@app.command("factor-forward-evaluate")
+def factor_forward_evaluate(
+    model: Annotated[Path, typer.Option("--model", "-m")],
+    config: Annotated[Path, typer.Option("--config", "-c")] = Path(
+        "configs/factors_broker_carry_dev.yaml"
+    ),
+    output: Annotated[Path, typer.Option("--output", "-o")] = Path(
+        "outputs/factor_forward"
+    ),
+) -> None:
+    """Evaluate strictly later data with a frozen factor model; never refit or reselect."""
+    parsed = FactorMiningConfig.from_yaml(config)
+    data = load_from_config(parsed.data)
+    point_in_time = load_point_in_time_data(parsed.point_in_time, data)
+    frozen = load_frozen_model(model, parsed)
+    predictions, signals = build_forward_predictions(data, parsed, frozen, point_in_time)
+    output.mkdir(parents=True, exist_ok=True)
+    prediction_columns = [
+        "_feature_time",
+        "_entry_time",
+        "_symbol",
+        "_direction",
+        "_atr",
+        "probability",
+        "estimated_swap_r",
+        "estimated_cost_r",
+        "expected_net_r",
+    ]
+    predictions[prediction_columns].to_csv(output / "forward_predictions.csv", index=False)
+    pd.DataFrame([signal.to_dict() for signal in signals]).to_csv(
+        output / "forward_signals.csv", index=False
+    )
+    freeze_time = pd.Timestamp(frozen["freeze_available_time"])
+    latest_time = max(frame.index[-1] for frame in data.values())
+    elapsed_days = max(0.0, (latest_time - freeze_time).total_seconds() / 86400)
+    period_complete = elapsed_days >= int(frozen["minimum_forward_days"])
+    if predictions.empty:
+        metrics = {}
+        status = "awaiting_strictly_later_data"
+    else:
+        forward_start = pd.Timestamp(predictions["_feature_time"].min())
+        forward_data = {
+            symbol: frame.loc[frame.index >= forward_start] for symbol, frame in data.items()
+        }
+        result = BacktestEngine(parsed.risk, parsed.costs).run(
+            forward_data,
+            signals,
+            {
+                "frozen_contract_sha256": frozen["contract_sha256"],
+                "forward_only": True,
+            },
+            risk_history_data=data,
+        )
+        metrics = calculate_metrics(result)
+        trades_frame(result).to_csv(output / "forward_trades.csv", index=False)
+        equity_frame(result).to_csv(output / "forward_equity.csv", index=True)
+        status = "duration_complete_requires_review" if period_complete else "collecting"
+    manifest = {
+        "status": status,
+        "contract_sha256": frozen["contract_sha256"],
+        "freeze_available_time": frozen["freeze_available_time"],
+        "latest_data_time": latest_time.isoformat(),
+        "elapsed_days": elapsed_days,
+        "minimum_forward_days": frozen["minimum_forward_days"],
+        "period_complete": period_complete,
+        "signals": len(signals),
+        "metrics": metrics,
+        "note": "No fitting, selection, or automatic trade approval occurs in forward evaluation.",
+    }
+    (output / "forward_manifest.json").write_text(
+        json.dumps(manifest, indent=2, allow_nan=False), encoding="utf-8"
+    )
+    console.print(
+        f"Forward status={status}; elapsed={elapsed_days:.1f}d; signals={len(signals)}; "
+        f"artifacts=[cyan]{output.resolve()}[/cyan]"
+    )
 
 
 @app.command()

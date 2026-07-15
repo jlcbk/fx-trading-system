@@ -50,6 +50,8 @@ CSV / Yahoo / Synthetic / OANDA fxPractice BA
     对应可成交侧的 high/low。
 11. 宏观、利率、远期和 swap 只按 `available_time` 向后合并；修订值不会回填到其发布时间前。
 12. DSL 不执行任意代码；候选数、复杂度、原语和算子均由配置限制，所有候选计入 FDR。
+13. 只有 candidate verdict 才生成冻结模型；forward 命令校验模型 SHA-256、因子/成本/风险/
+    市场契约，只接受严格晚于冻结时间的数据，且没有任何拟合或重选路径。
 
 ## 当前边界
 
