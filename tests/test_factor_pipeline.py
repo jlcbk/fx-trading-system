@@ -9,6 +9,7 @@ from fx_system.config import CostConfig, DataConfig, RiskConfig
 from fx_system.data import SyntheticFXProvider
 from fx_system.factor_config import FactorMiningConfig, FactorSettings
 from fx_system.factor_research import (
+    _add_economic_scores,
     _fold_boundaries,
     _holdout_boundary,
     factor_statistics,
@@ -51,6 +52,53 @@ def test_factor_panel_has_no_future_dependency() -> None:
     )
 
 
+def test_unknown_financing_is_a_scenario_not_silent_net_return() -> None:
+    data = SyntheticFXProvider(seed=118).generate(
+        ["EURUSD", "GBPUSD"], bars=20, interval="1d", price_mode="bid_ask"
+    )
+    data = {
+        symbol: frame.drop(columns=["swap_long_pips", "swap_short_pips"])
+        for symbol, frame in data.items()
+    }
+    timestamp = data["EURUSD"].index[10]
+    predictions = pd.DataFrame(
+        [
+            {
+                "_symbol": "EURUSD",
+                "_feature_time": timestamp,
+                "_entry_time": data["EURUSD"].index[11],
+                "_atr": 0.01,
+                "_direction": direction,
+                "probability": probability,
+            }
+            for direction, probability in ((1, 0.8), (-1, 0.2))
+        ]
+    )
+    config = FactorMiningConfig(
+        data=DataConfig(
+            provider="csv",
+            symbols=["EURUSD", "GBPUSD"],
+            interval="1d",
+            price_mode="bid_ask",
+        ),
+        costs=CostConfig(),
+        risk=RiskConfig(close_before_weekend=False),
+        factor=FactorSettings(),
+    )
+    scored = _add_economic_scores(
+        predictions,
+        data,
+        config,
+        target_mean_r=1.0,
+        non_target_mean_r=-1.0,
+    )
+    assert scored["financing_cost_known"].eq(False).all()
+    assert scored["financing_source"].eq("zero_placeholder").all()
+    assert scored["expected_gross_r"].notna().all()
+    assert scored["expected_scenario_r"].notna().all()
+    assert scored["expected_net_r"].isna().all()
+
+
 def test_factor_significance_clusters_mirrored_rows_and_controls_fdr() -> None:
     generator = np.random.default_rng(105)
     timestamps = pd.date_range("2020-01-01", periods=240, freq="1D", tz="UTC")
@@ -76,6 +124,7 @@ def test_factor_significance_clusters_mirrored_rows_and_controls_fdr() -> None:
     assert strong["effective_time_blocks"] == 24
     assert strong["bootstrap_p_value"] < 0.01
     assert strong["fdr_q_value"] < 0.10
+    assert strong["by_fdr_q_value"] >= strong["fdr_q_value"]
     assert bool(strong["fdr_significant"])
 
 
@@ -265,8 +314,5 @@ def test_small_factor_mining_pipeline_runs_out_of_sample() -> None:
         }
     )
     strict_config = config.model_copy(update={"factor": strict_settings})
-    rejected = run_factor_mining(data, strict_config)
-    assert rejected.summary["no_eligible_factor_folds"] == rejected.summary["folds"]
-    assert rejected.summary["total_trades"] == 0
-    assert all(not fold.selected_features for fold in rejected.folds)
-    assert all(fold.model_metrics["roc_auc"] == 0.5 for fold in rejected.folds)
+    with pytest.raises(ValueError, match="first Benjamini-Hochberg threshold"):
+        run_factor_mining(data, strict_config)

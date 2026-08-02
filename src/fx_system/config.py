@@ -10,8 +10,11 @@ from .models import CurrencyPair
 
 
 class DataConfig(BaseModel):
-    provider: Literal["csv", "yahoo", "synthetic", "oanda"] = "synthetic"
+    provider: Literal["csv", "yahoo", "synthetic", "oanda", "dukascopy"] = "synthetic"
     directory: Path = Path("data")
+    dukascopy_cache_directory: Path = Path("data/dukascopy_cache")
+    dukascopy_concurrency: int = Field(8, ge=1, le=32)
+    dukascopy_max_retries: int = Field(2, ge=0, le=10)
     swap_directory: Path | None = None
     maximum_swap_staleness_days: int = Field(14, ge=1, le=366)
     symbols: list[str] = Field(

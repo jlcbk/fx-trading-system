@@ -10,6 +10,8 @@ from .indicators import atr, ema, rolling_zscore, rsi
 from .models import CurrencyPair
 from .point_in_time import PointInTimeData, build_carry_factors
 
+FACTOR_IMPLEMENTATION_VERSION = "2"
+
 
 @dataclass(frozen=True)
 class FactorDefinition:
@@ -171,6 +173,36 @@ def _definitions() -> list[FactorDefinition]:
         "carry",
         True,
         "Policy-rate differential divided by 20-bar annualized volatility",
+    )
+    add(
+        "cftc_dealer_net",
+        "positioning",
+        True,
+        "Point-in-time base minus quote CFTC dealer net ratio",
+    )
+    add(
+        "cftc_asset_manager_net",
+        "positioning",
+        True,
+        "Point-in-time base minus quote CFTC asset-manager net ratio",
+    )
+    add(
+        "cftc_leveraged_net",
+        "positioning",
+        True,
+        "Point-in-time base minus quote CFTC leveraged-money net ratio",
+    )
+    add(
+        "cftc_leveraged_change_4w",
+        "positioning",
+        True,
+        "Four-week change in base minus quote leveraged-money net ratio",
+    )
+    add(
+        "cftc_leveraged_z_156",
+        "positioning",
+        True,
+        "Three-year rolling z-score of base minus quote leveraged positioning",
     )
     add(
         "spread_atr",
@@ -415,6 +447,11 @@ def build_factor_panel(
                 "curve_slope_differential",
                 "forward_discount_1m",
                 "carry_to_vol_20",
+                "cftc_dealer_net",
+                "cftc_asset_manager_net",
+                "cftc_leveraged_net",
+                "cftc_leveraged_change_4w",
+                "cftc_leveraged_z_156",
             ):
                 factors[carry_factor] = np.nan
         if "spread_close" in frame:

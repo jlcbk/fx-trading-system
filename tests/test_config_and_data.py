@@ -95,3 +95,19 @@ def test_csv_provider_honors_exclusive_research_end_date(tmp_path) -> None:
     loaded = load_from_config(config)["EURUSD"]
     assert loaded.index.min() >= pd.Timestamp("2020-01-03", tz="UTC")
     assert loaded.index.max() < pd.Timestamp("2020-01-15", tz="UTC")
+
+
+def test_csv_provider_rejects_manifest_hash_mismatch(tmp_path) -> None:
+    data = SyntheticFXProvider(seed=9).generate(["EURUSD"], bars=20, interval="1d")
+    save_csv_directory(data, tmp_path)
+    path = tmp_path / "EURUSD.csv"
+    path.write_text(path.read_text(encoding="utf-8") + "\n", encoding="utf-8")
+    config = DataConfig(
+        provider="csv",
+        directory=tmp_path,
+        symbols=["EURUSD"],
+        interval="1d",
+        start="2020-01-01",
+    )
+    with pytest.raises(ValueError, match="SHA-256"):
+        load_from_config(config)

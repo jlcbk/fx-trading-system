@@ -17,8 +17,29 @@ class PointInTimeConfig(BaseModel):
     directory: Path = Path("data/point_in_time")
     currency_rates_file: str = "currency_rates.csv"
     forward_points_file: str = "forward_points.csv"
+    positioning_enabled: bool = False
+    currency_positioning_file: str = "currency_positioning.csv"
+    positioning_release_quality: Literal["approximate", "verified"] = "approximate"
+    allow_legacy_unverified_carry_rows: bool = False
+    require_verified_carry_manifests: bool = False
     maximum_staleness_days: int = Field(45, ge=1, le=366)
+    maximum_positioning_staleness_days: int = Field(14, ge=7, le=45)
     synthetic_seed: int = 42
+
+    @model_validator(mode="after")
+    def carry_source_contract(self) -> PointInTimeConfig:
+        if self.require_verified_carry_manifests and self.provider != "csv":
+            raise ValueError(
+                "verified carry source manifests are available only for provider=csv"
+            )
+        if (
+            self.require_verified_carry_manifests
+            and self.allow_legacy_unverified_carry_rows
+        ):
+            raise ValueError(
+                "verified carry source manifests cannot be combined with legacy carry rows"
+            )
+        return self
 
 
 class FactorDiscoverySettings(BaseModel):
@@ -44,6 +65,9 @@ class FactorDiscoverySettings(BaseModel):
             "rate_differential",
             "forward_discount_1m",
             "carry_to_vol_20",
+            "cftc_leveraged_net",
+            "cftc_asset_manager_net",
+            "cftc_leveraged_change_4w",
         ]
     )
 
@@ -83,7 +107,7 @@ class FactorSettings(BaseModel):
     max_features: int = Field(32, ge=5, le=100)
     maximum_feature_correlation: float = Field(0.90, ge=0.5, le=0.999)
     minimum_feature_coverage: float = Field(0.80, ge=0.5, le=1)
-    bootstrap_samples: int = Field(500, ge=100, le=10_000)
+    bootstrap_samples: int = Field(500, ge=100, le=100_000)
     bootstrap_block_bars: int = Field(20, ge=2, le=250)
     factor_fdr_level: float = Field(0.10, gt=0, le=0.50)
     require_fdr_significance: bool = False
@@ -94,8 +118,13 @@ class FactorSettings(BaseModel):
     promotion_required_stress_multiplier: float = Field(1.5, ge=1.0, le=5.0)
     minimum_broker_history_years: float = Field(8.0, ge=1.0, le=20.0)
     minimum_auxiliary_coverage: float = Field(0.80, ge=0.5, le=1.0)
+    minimum_market_bar_coverage: float = Field(0.80, ge=0.5, le=1.0)
+    minimum_cross_symbol_coverage: float = Field(0.90, ge=0.5, le=1.0)
+    minimum_source_hour_coverage: float = Field(0.95, ge=0.5, le=1.0)
+    maximum_market_gap_hours: int = Field(120, ge=24, le=336)
     freeze_minimum_selection_fraction: float = Field(0.75, ge=0.5, le=1.0)
     forward_minimum_days: int = Field(90, ge=30, le=366)
+    minimum_forward_external_feature_coverage: float = Field(0.80, ge=0.5, le=1.0)
     model_c: float = Field(0.10, gt=0, le=100)
     model_l1_ratio: float = Field(0.15, ge=0, le=1)
     calibration_fraction: float = Field(0.20, ge=0.10, le=0.40)
@@ -141,8 +170,10 @@ class FactorMiningConfig(BaseModel):
 
     @model_validator(mode="after")
     def enforce_execution_limits(self) -> FactorMiningConfig:
-        if self.data.provider == "oanda" and self.data.price_mode != "bid_ask":
-            raise ValueError("OANDA factor data requires data.price_mode=bid_ask")
+        if self.data.provider in {"oanda", "dukascopy"} and self.data.price_mode != "bid_ask":
+            raise ValueError(
+                f"{self.data.provider.title()} factor data requires data.price_mode=bid_ask"
+            )
         if self.factor.reward_risk > self.risk.max_reward_risk:
             raise ValueError("factor target/stop ratio exceeds risk.max_reward_risk")
         if self.factor.max_holding_hours > self.risk.max_holding_hours:
@@ -152,6 +183,16 @@ class FactorMiningConfig(BaseModel):
                 "factor mining requires risk.close_before_weekend=false "
                 "so labels and execution match"
             )
+        if (
+            self.point_in_time.positioning_enabled
+            and self.point_in_time.positioning_release_quality == "verified"
+        ):
+            minimum_blocks = {"1h": 1560, "4h": 390, "1d": 65}
+            if self.factor.bootstrap_block_bars < minimum_blocks[self.data.interval]:
+                raise ValueError(
+                    "verified weekly positioning requires a bootstrap block of at least "
+                    "13 trading weeks"
+                )
         return self
 
     @classmethod

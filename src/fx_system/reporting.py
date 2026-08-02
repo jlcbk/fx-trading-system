@@ -29,11 +29,17 @@ def data_fingerprint(data: Mapping[str, pd.DataFrame]) -> str:
     digest = hashlib.sha256()
     for symbol, frame in sorted(data.items()):
         digest.update(symbol.encode())
-        digest.update(str(frame.index[0]).encode())
-        digest.update(str(frame.index[-1]).encode())
-        digest.update(
-            pd.util.hash_pandas_object(frame[["open", "high", "low", "close"]]).values.tobytes()
+        columns = sorted(
+            column
+            for column in frame.columns
+            if column in {"open", "high", "low", "close", "volume"}
+            or column == "tick_count"
+            or column.startswith(("bid_", "ask_", "spread_", "swap_"))
         )
+        digest.update("\0".join(columns).encode())
+        digest.update("\0".join(str(frame[column].dtype) for column in columns).encode())
+        hashed = pd.util.hash_pandas_object(frame[columns], index=True, categorize=False)
+        digest.update(hashed.values.tobytes())
     return digest.hexdigest()
 
 

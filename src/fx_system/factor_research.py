@@ -33,6 +33,11 @@ from .models import BacktestResult, CurrencyPair, Side, Signal
 from .point_in_time import PointInTimeData
 from .rates import FXRateGraph
 from .reporting import data_fingerprint
+from .statistical_validation import (
+    benjamini_hochberg,
+    benjamini_yekutieli,
+    minimum_resamples_for_fdr,
+)
 
 
 @dataclass
@@ -115,17 +120,6 @@ def _block_bootstrap_rank_test(
         / (settings.bootstrap_samples + 1)
     )
     return observed, p_value, block_count
-
-
-def _benjamini_hochberg(p_values: pd.Series) -> np.ndarray:
-    values = p_values.to_numpy(dtype=float)
-    order = np.argsort(values)
-    ranked = values[order]
-    adjusted = ranked * len(values) / np.arange(1, len(values) + 1)
-    adjusted = np.minimum.accumulate(adjusted[::-1])[::-1].clip(0, 1)
-    result = np.empty_like(adjusted)
-    result[order] = adjusted
-    return result
 
 
 def _independent_factor_observations(
@@ -227,8 +221,14 @@ def factor_statistics(
             }
         )
     statistics = pd.DataFrame(rows)
-    statistics["fdr_q_value"] = _benjamini_hochberg(statistics["bootstrap_p_value"])
+    statistics["fdr_q_value"] = benjamini_hochberg(statistics["bootstrap_p_value"])
     statistics["fdr_significant"] = statistics["fdr_q_value"] <= settings.factor_fdr_level
+    statistics["by_fdr_q_value"] = benjamini_yekutieli(
+        statistics["bootstrap_p_value"]
+    )
+    statistics["by_fdr_significant"] = (
+        statistics["by_fdr_q_value"] <= settings.factor_fdr_level
+    )
     return statistics.sort_values(
         ["fdr_q_value", "absolute_ic"], ascending=[True, False]
     ).reset_index(drop=True)
@@ -241,6 +241,15 @@ def screen_factors(
     directional_features: set[str] | None = None,
 ) -> tuple[list[str], pd.DataFrame]:
     features = features if features is not None else factor_columns()
+    if settings.require_fdr_significance:
+        minimum_resamples = minimum_resamples_for_fdr(
+            len(features), settings.factor_fdr_level
+        )
+        if settings.bootstrap_samples < minimum_resamples:
+            raise ValueError(
+                "bootstrap_samples cannot resolve the first Benjamini-Hochberg threshold: "
+                f"configured={settings.bootstrap_samples}, required>={minimum_resamples}"
+            )
     clean = train[features].replace([np.inf, -np.inf], np.nan)
     statistics = factor_statistics(train, settings, features, directional_features)
     significance_eligible = (
@@ -327,6 +336,8 @@ def _add_economic_scores(
     rate_graph = FXRateGraph(data)
     estimated_costs: list[float] = []
     estimated_swaps: list[float] = []
+    financing_cost_known: list[bool] = []
+    financing_sources: list[str] = []
     for _, row in predictions.iterrows():
         symbol = str(row["_symbol"])
         pair = CurrencyPair.parse(symbol)
@@ -339,6 +350,8 @@ def _add_economic_scores(
         except ValueError:
             estimated_costs.append(float("nan"))
             estimated_swaps.append(float("nan"))
+            financing_cost_known.append(False)
+            financing_sources.append("conversion_unavailable")
             continue
         stop_risk = float(row["_atr"]) * config.factor.stop_atr * quote_conversion
         spread_pips = 0.0 if has_bid_ask(data[symbol]) else config.costs.spread_for(symbol)
@@ -353,12 +366,18 @@ def _add_economic_scores(
             else config.costs.daily_swap_pips_short
         )
         daily_swap = configured_swaps.get(symbol, 0.0)
+        swap_is_historical = False
+        financing_source = (
+            "configured_scenario" if symbol in configured_swaps else "zero_placeholder"
+        )
         if swap_column in data[symbol]:
             known_swaps = data[symbol].loc[
                 data[symbol].index <= timestamp, swap_column
             ].dropna()
             if len(known_swaps):
                 daily_swap = float(known_swaps.iloc[-1])
+                swap_is_historical = True
+                financing_source = "historical_asof"
         entry_time = pd.Timestamp(row["_entry_time"])
         last_rollover = entry_time + timedelta(hours=config.factor.max_holding_hours)
         swap_pips = 0.0
@@ -377,6 +396,8 @@ def _add_economic_scores(
             else float("nan")
         )
         estimated_swaps.append(swap_r)
+        financing_cost_known.append(swap_is_historical)
+        financing_sources.append(financing_source)
         estimated_costs.append(
             (execution_cost + commission_cost) / stop_risk
             - swap_r
@@ -387,10 +408,20 @@ def _add_economic_scores(
     result = predictions.copy()
     result["estimated_swap_r"] = estimated_swaps
     result["estimated_cost_r"] = estimated_costs
-    result["expected_net_r"] = (
+    result["estimated_scenario_cost_r"] = result["estimated_cost_r"]
+    result["financing_cost_known"] = financing_cost_known
+    result["financing_source"] = financing_sources
+    result["expected_gross_r"] = (
         result["probability"] * target_mean_r
         + (1 - result["probability"]) * non_target_mean_r
-        - result["estimated_cost_r"]
+    )
+    result["expected_scenario_r"] = (
+        result["expected_gross_r"] - result["estimated_scenario_cost_r"]
+    )
+    # Compatibility field for consumers that explicitly require historical
+    # financing. Unknown financing must not silently become a zero-cost net R.
+    result["expected_net_r"] = result["expected_scenario_r"].where(
+        result["financing_cost_known"]
     )
     return result
 
@@ -400,13 +431,13 @@ def _signals_from_predictions(
 ) -> list[Signal]:
     candidates: list[Signal] = []
     for (_, symbol), group in predictions.groupby(["_feature_time", "_symbol"], sort=True):
-        ranked = group.sort_values("expected_net_r", ascending=False)
+        ranked = group.sort_values("expected_scenario_r", ascending=False)
         best = ranked.iloc[0]
         runner_up = float(ranked.iloc[1]["probability"]) if len(ranked) > 1 else 0.0
         probability = float(best["probability"])
-        expected_net_r = float(best["expected_net_r"])
+        expected_scenario_r = float(best["expected_scenario_r"])
         if (
-            expected_net_r < settings.minimum_expected_net_r
+            expected_scenario_r < settings.minimum_expected_net_r
             or probability - runner_up < settings.minimum_direction_gap
         ):
             continue
@@ -426,7 +457,8 @@ def _signals_from_predictions(
                 max_holding_hours=settings.max_holding_hours,
                 reason=(
                     f"estimated target-first probability={probability:.3f}; "
-                    f"expected_net_r={expected_net_r:.3f}"
+                    f"expected_scenario_r={expected_scenario_r:.3f};"
+                    f"financing_source={best['financing_source']}"
                 ),
             )
         )
@@ -468,6 +500,101 @@ def _stressed_costs(config: FactorMiningConfig, multiplier: float) -> Any:
     )
 
 
+def _market_data_quality(
+    data: Mapping[str, pd.DataFrame], config: FactorMiningConfig
+) -> dict[str, Any]:
+    expected_bars_per_year = {"1h": 24 * 5 * 52, "4h": 6 * 5 * 52, "1d": 5 * 52}[
+        config.data.interval
+    ]
+    duration = {
+        "1h": timedelta(hours=1),
+        "4h": timedelta(hours=4),
+        "1d": timedelta(days=1),
+    }[config.data.interval]
+    duration_nanoseconds = int(duration.total_seconds() * 1_000_000_000)
+    safe_end = (
+        pd.Timestamp(config.data.end)
+        if config.data.end is not None
+        else pd.Timestamp.now(tz="UTC")
+    )
+    safe_end = (
+        safe_end.tz_localize("UTC") if safe_end.tzinfo is None else safe_end.tz_convert("UTC")
+    )
+    grid_alignment: dict[str, bool] = {}
+    bar_coverage: dict[str, float] = {}
+    longest_gap_hours: dict[str, float] = {}
+    incomplete_tail: dict[str, bool] = {}
+    source_provider: dict[str, str | None] = {}
+    source_manifest_complete: dict[str, bool] = {}
+    source_hour_coverage: dict[str, float | None] = {}
+    source_failed_hours: dict[str, int] = {}
+    source_parser_version: dict[str, str | None] = {}
+    csv_hash_verified: dict[str, bool] = {}
+    timestamp_sets: list[set[int]] = []
+
+    for symbol, frame in data.items():
+        elapsed_years = max(
+            (frame.index[-1] - frame.index[0]).total_seconds() / (365.25 * 86400),
+            1 / expected_bars_per_year,
+        )
+        bar_coverage[symbol] = min(
+            1.0, len(frame) / (elapsed_years * expected_bars_per_year)
+        )
+        grid_alignment[symbol] = bool(
+            np.all(frame.index.asi8 % duration_nanoseconds == 0)
+        )
+        gaps = frame.index.to_series().diff().dropna().dt.total_seconds() / 3600
+        longest_gap_hours[symbol] = float(gaps.max()) if not gaps.empty else 0.0
+        incomplete_tail[symbol] = bool(frame.index[-1] + duration > safe_end)
+        provider = frame.attrs.get("source_provider")
+        source_provider[symbol] = str(provider) if provider is not None else None
+        source_manifest_complete[symbol] = bool(
+            frame.attrs.get("source_manifest_complete", False)
+        )
+        raw_coverage = frame.attrs.get("source_hour_coverage")
+        source_hour_coverage[symbol] = (
+            float(raw_coverage) if raw_coverage is not None else None
+        )
+        source_failed_hours[symbol] = int(frame.attrs.get("source_failed_hours", 0))
+        parser = frame.attrs.get("source_parser_version")
+        source_parser_version[symbol] = str(parser) if parser is not None else None
+        csv_hash_verified[symbol] = bool(
+            frame.attrs.get("source_csv_hash_verified", config.data.provider != "csv")
+        )
+        timestamp_sets.append(set(int(value) for value in frame.index.asi8))
+
+    union = set().union(*timestamp_sets)
+    common = set.intersection(*timestamp_sets) if timestamp_sets else set()
+    cross_symbol_coverage = len(common) / len(union) if union else 0.0
+    known_source_coverage = [
+        value for value in source_hour_coverage.values() if value is not None
+    ]
+    return {
+        "expected_bars_per_year": expected_bars_per_year,
+        "bar_coverage_by_symbol": bar_coverage,
+        "minimum_bar_coverage": min(bar_coverage.values()),
+        "timestamp_grid_aligned_by_symbol": grid_alignment,
+        "all_timestamp_grids_aligned": all(grid_alignment.values()),
+        "longest_gap_hours_by_symbol": longest_gap_hours,
+        "maximum_gap_hours": max(longest_gap_hours.values()),
+        "incomplete_tail_by_symbol": incomplete_tail,
+        "incomplete_tail_count": sum(incomplete_tail.values()),
+        "cross_symbol_common_coverage": cross_symbol_coverage,
+        "source_provider_by_symbol": source_provider,
+        "source_manifest_complete_by_symbol": source_manifest_complete,
+        "all_source_manifests_complete": all(source_manifest_complete.values()),
+        "source_hour_coverage_by_symbol": source_hour_coverage,
+        "source_failed_hours_by_symbol": source_failed_hours,
+        "total_source_failed_hours": sum(source_failed_hours.values()),
+        "source_parser_version_by_symbol": source_parser_version,
+        "csv_hash_verified_by_symbol": csv_hash_verified,
+        "all_csv_hashes_verified": all(csv_hash_verified.values()),
+        "minimum_known_source_hour_coverage": (
+            min(known_source_coverage) if known_source_coverage else 0.0
+        ),
+    }
+
+
 def _data_readiness(
     data: Mapping[str, pd.DataFrame],
     panel: pd.DataFrame,
@@ -487,31 +614,126 @@ def _data_readiness(
         else 0.0
         for symbol, frame in data.items()
     }
-    carry_coverage = float(panel["rate_differential"].notna().mean())
-    broker_ready = (
+    carry_component_coverage = {
+        column: float(panel[column].notna().mean())
+        for column in (
+            "rate_differential",
+            "curve_slope_differential",
+            "forward_discount_1m",
+        )
+    }
+    exploratory_carry_value_coverage = float(
+        panel[
+            ["rate_differential", "curve_slope_differential", "forward_discount_1m"]
+        ]
+        .notna()
+        .all(axis=1)
+        .mean()
+    )
+    market_ois_verified = panel.get(
+        "_market_ois_verified", pd.Series(False, index=panel.index)
+    ).fillna(False)
+    market_forward_verified = panel.get(
+        "_market_forward_verified", pd.Series(False, index=panel.index)
+    ).fillna(False)
+    historical_market_ois_coverage = float(market_ois_verified.mean())
+    historical_market_forward_coverage = float(market_forward_verified.mean())
+    historical_market_carry_coverage = float(
+        (
+            panel[
+                ["rate_differential", "curve_slope_differential", "forward_discount_1m"]
+            ]
+            .notna()
+            .all(axis=1)
+            & market_ois_verified
+            & market_forward_verified
+        ).mean()
+    )
+    carry_contract = (
+        point_in_time.carry_contract_audit()
+        if point_in_time is not None
+        else {
+            "currency_rates_manifest_verified": False,
+            "forward_points_manifest_verified": False,
+            "market_ois_row_fraction": 0.0,
+            "historical_market_forward_row_fraction": 0.0,
+            "verified_historical_market_contract": False,
+        }
+    )
+    positioning_coverage = float(panel["cftc_leveraged_net"].notna().mean())
+    market_quality = _market_data_quality(data, config)
+    allowed_execution_sources = {"dukascopy", "oanda_fxpractice"}
+    sources_are_execution_grade = all(
+        provider in allowed_execution_sources
+        for provider in market_quality["source_provider_by_symbol"].values()
+    )
+    factor_discovery_ready = (
         config.data.provider != "synthetic"
+        and sources_are_execution_grade
         and len(bid_ask_symbols) == len(data)
         and min(history_years.values()) >= config.factor.minimum_broker_history_years
+        and market_quality["minimum_bar_coverage"]
+        >= config.factor.minimum_market_bar_coverage
+        and market_quality["cross_symbol_common_coverage"]
+        >= config.factor.minimum_cross_symbol_coverage
+        and market_quality["minimum_known_source_hour_coverage"]
+        >= config.factor.minimum_source_hour_coverage
+        and market_quality["all_timestamp_grids_aligned"]
+        and market_quality["incomplete_tail_count"] == 0
+        and market_quality["maximum_gap_hours"] <= config.factor.maximum_market_gap_hours
+        and market_quality["total_source_failed_hours"] == 0
+        and market_quality["all_source_manifests_complete"]
+        and market_quality["all_csv_hashes_verified"]
+    )
+    historical_cost_validation_ready = (
+        factor_discovery_ready
         and min(swap_coverage.values()) >= config.factor.minimum_auxiliary_coverage
         and point_in_time is not None
         and config.point_in_time.provider != "synthetic"
-        and carry_coverage >= config.factor.minimum_auxiliary_coverage
+        and not config.point_in_time.allow_legacy_unverified_carry_rows
+        and bool(carry_contract["verified_historical_market_contract"])
+        and historical_market_carry_coverage
+        >= config.factor.minimum_auxiliary_coverage
+        and (
+            not config.point_in_time.positioning_enabled
+            or (
+                config.point_in_time.positioning_release_quality == "verified"
+                and positioning_coverage >= config.factor.minimum_auxiliary_coverage
+            )
+        )
     )
     return {
         "tier": (
             "software_validation"
             if config.data.provider == "synthetic"
-            else ("broker_bid_ask" if len(bid_ask_symbols) == len(data) else "midpoint_research")
+            else ("observed_bid_ask" if len(bid_ask_symbols) == len(data) else "midpoint_research")
         ),
-        "broker_ready": broker_ready,
+        "factor_discovery_ready": factor_discovery_ready,
+        "historical_cost_validation_ready": historical_cost_validation_ready,
+        # Backward-compatible alias. New code must use the two explicit gates
+        # above: a concrete broker/legal entity is not a factor-discovery input.
+        "broker_ready": historical_cost_validation_ready,
         "minimum_history_years": min(history_years.values()),
         "history_years_by_symbol": history_years,
         "bid_ask_symbols": bid_ask_symbols,
         "minimum_swap_coverage": min(swap_coverage.values()),
         "swap_coverage_by_symbol": swap_coverage,
-        "carry_coverage": carry_coverage,
+        "carry_coverage": historical_market_carry_coverage,
+        "exploratory_carry_value_coverage": exploratory_carry_value_coverage,
+        "carry_component_coverage": carry_component_coverage,
+        "historical_market_ois_coverage": historical_market_ois_coverage,
+        "historical_market_forward_coverage": historical_market_forward_coverage,
+        "historical_market_carry_coverage": historical_market_carry_coverage,
+        "carry_source_contract": carry_contract,
+        "positioning_coverage": positioning_coverage,
+        "positioning_release_quality": config.point_in_time.positioning_release_quality,
         "required_history_years": config.factor.minimum_broker_history_years,
         "required_auxiliary_coverage": config.factor.minimum_auxiliary_coverage,
+        "required_market_bar_coverage": config.factor.minimum_market_bar_coverage,
+        "required_cross_symbol_coverage": config.factor.minimum_cross_symbol_coverage,
+        "required_source_hour_coverage": config.factor.minimum_source_hour_coverage,
+        "maximum_allowed_market_gap_hours": config.factor.maximum_market_gap_hours,
+        **market_quality,
     }
 
 
@@ -806,8 +1028,8 @@ def run_factor_mining(
         }
     required_stress_key = f"{config.factor.promotion_required_stress_multiplier:g}x"
     positive_fraction = sum(value > 0 for value in returns) / len(returns)
-    development_passes = (
-        data_readiness["broker_ready"]
+    factor_discovery_passes = (
+        data_readiness["factor_discovery_ready"]
         and all(fold.selected_features for fold in development_folds)
         and sum(trades) >= config.factor.promotion_minimum_trades
         and positive_fraction >= config.factor.promotion_minimum_positive_fold_fraction
@@ -818,6 +1040,10 @@ def run_factor_mining(
         )
         and cost_stress[required_stress_key]["compounded_return"] > 0
     )
+    strategy_promotion_passes = bool(
+        factor_discovery_passes
+        and data_readiness["historical_cost_validation_ready"]
+    )
     holdout_passes = bool(
         holdout is not None
         and holdout.trading_metrics["total_return"] > 0
@@ -826,13 +1052,23 @@ def run_factor_mining(
     )
     verdict = (
         "research_candidate_requires_paper"
-        if development_passes and holdout_passes
+        if strategy_promotion_passes and holdout_passes
         else (
             "research_candidate_requires_new_holdout"
-            if development_passes and holdout is None
-            else "rejected_for_trading"
+            if strategy_promotion_passes and holdout is None
+            else (
+                "factor_candidate_requires_cost_validation"
+                if factor_discovery_passes
+                else "rejected_for_trading"
+            )
         )
     )
+    research_data_end_by_symbol = {
+        symbol: frame.index[-1] for symbol, frame in data.items()
+    }
+    # Start forward time only after every timestamp that was already present in
+    # any development input, including an unmatched tail on one symbol.
+    research_data_end = max(research_data_end_by_symbol.values())
     summary = {
         "folds": len(development_folds),
         "positive_folds": sum(value > 0 for value in returns),
@@ -851,10 +1087,20 @@ def run_factor_mining(
         "point_in_time_fingerprint_sha256": (
             point_in_time.fingerprint() if point_in_time is not None else None
         ),
+        "market_data_fingerprint_sha256": data_fingerprint(data),
+        "point_in_time_prefix_fingerprint_sha256": (
+            point_in_time.fingerprint(research_data_end)
+            if point_in_time is not None
+            else None
+        ),
+        "research_data_end": research_data_end,
+        "research_data_end_by_symbol": research_data_end_by_symbol,
         "generated_factor_count": len(generated),
         "factor_hypotheses_tested": len(features),
         "data_readiness": data_readiness,
         "cost_stress": cost_stress,
+        "factor_discovery_passes": factor_discovery_passes,
+        "strategy_promotion_passes": strategy_promotion_passes,
         "verdict": verdict,
         "holdout": (
             {
@@ -1129,7 +1375,9 @@ def _markdown_factor_report(
 - Budget-generated DSL factors: {summary["generated_factor_count"]}
 - Point-in-time data SHA-256: `{summary["point_in_time_fingerprint_sha256"] or "disabled"}`
 - Evidence tier: `{summary["data_readiness"]["tier"]}`
-- Broker-data promotion ready: `{summary["data_readiness"]["broker_ready"]}`
+- Factor-discovery data ready: `{summary["data_readiness"]["factor_discovery_ready"]}`
+- Historical-cost validation ready:
+  `{summary["data_readiness"]["historical_cost_validation_ready"]}`
 - Minimum history: {summary["data_readiness"]["minimum_history_years"]:.2f} years
 - Minimum historical swap coverage: {summary["data_readiness"]["minimum_swap_coverage"]:.2%}
 - Carry coverage: {summary["data_readiness"]["carry_coverage"]:.2%}
@@ -1170,7 +1418,8 @@ Promotion verdict: `{summary["verdict"]}`.
 |---|---:|---:|---:|---:|---:|---:|
 {factor_rows}
 
-A factor is not approved merely because it appears in this table. Promotion requires stable signs,
-adequate trade count, positive net results across several untouched windows, broker bid/ask cost
-stress, and a separate paper-trading period.
+A factor is not approved merely because it appears in this table. Factor discovery requires stable
+signs, adequate trade count, several non-overlapping windows, observed bid/ask data, and generic
+cost stress. Claiming a net-return strategy additionally requires historical cost validation and a
+separate forward paper period; a broker legal entity is not an input to factor discovery.
 """

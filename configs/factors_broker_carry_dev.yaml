@@ -1,7 +1,7 @@
 data:
   provider: csv
-  directory: data/oanda_bid_ask
-  swap_directory: data/oanda_swaps
+  directory: data/dukascopy_bid_ask
+  swap_directory: data/historical_swaps
   maximum_swap_staleness_days: 14
   symbols:
     [EURUSD, GBPUSD, USDJPY, USDCHF, AUDUSD, NZDUSD, USDCAD, EURGBP, EURJPY, GBPJPY, AUDJPY, CADJPY]
@@ -39,6 +39,10 @@ point_in_time:
   directory: data/point_in_time
   currency_rates_file: currency_rates.csv
   forward_points_file: forward_points.csv
+  # Promotion-grade carry requires both CSVs to have row-level source/quality metadata and
+  # matching *.manifest.json files; policy/overnight proxies cannot satisfy this contract.
+  require_verified_carry_manifests: true
+  positioning_enabled: false
   maximum_staleness_days: 45
 
 discovery:
@@ -67,7 +71,7 @@ factor:
   max_features: 32
   maximum_feature_correlation: 0.90
   minimum_feature_coverage: 0.80
-  bootstrap_samples: 1000
+  bootstrap_samples: 50000
   bootstrap_block_bars: 120
   factor_fdr_level: 0.10
   require_fdr_significance: true

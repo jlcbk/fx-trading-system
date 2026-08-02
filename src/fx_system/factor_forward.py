@@ -13,11 +13,12 @@ import pandas as pd
 
 from .factor_config import FactorMiningConfig
 from .factor_dsl import generate_discovery_factors
-from .factors import FACTOR_DEFINITIONS, build_factor_panel
+from .factors import FACTOR_DEFINITIONS, FACTOR_IMPLEMENTATION_VERSION, build_factor_panel
 from .models import Signal
 from .point_in_time import PointInTimeData
+from .reporting import data_fingerprint
 
-MODEL_VERSION = 1
+MODEL_VERSION = 2
 
 
 def _json_value(value: Any) -> Any:
@@ -132,13 +133,29 @@ def fit_frozen_factor_model(
         "discovery_settings": config.discovery.model_dump(mode="json"),
         "cost_settings": config.costs.model_dump(mode="json"),
         "risk_settings": config.risk.model_dump(mode="json"),
+        "point_in_time_settings": config.point_in_time.model_dump(mode="json"),
+        "factor_implementation_version": FACTOR_IMPLEMENTATION_VERSION,
         "market_contract": {
             "provider": config.data.provider,
             "interval": config.data.interval,
             "price_mode": config.data.price_mode,
         },
         "symbols": sorted(mining.dataset["_symbol"].unique()),
-        "market_data_fingerprint_sha256": mining.summary.get("data_fingerprint_sha256"),
+        "research_data_end": mining.summary["research_data_end"],
+        "research_data_end_by_symbol": mining.summary["research_data_end_by_symbol"],
+        "market_data_prefix_sha256": mining.summary["market_data_fingerprint_sha256"],
+        "point_in_time_prefix_sha256": mining.summary[
+            "point_in_time_prefix_fingerprint_sha256"
+        ],
+        "market_source_provider_by_symbol": mining.summary["data_readiness"][
+            "source_provider_by_symbol"
+        ],
+        "market_source_parser_version_by_symbol": mining.summary["data_readiness"][
+            "source_parser_version_by_symbol"
+        ],
+        "market_data_fingerprint_sha256": mining.summary.get(
+            "market_data_fingerprint_sha256"
+        ),
         "point_in_time_fingerprint_sha256": mining.summary.get(
             "point_in_time_fingerprint_sha256"
         ),
@@ -161,6 +178,10 @@ def validate_frozen_model(model: dict[str, Any], config: FactorMiningConfig) -> 
         raise ValueError("Frozen model cost settings do not match the forward config")
     if model.get("risk_settings") != config.risk.model_dump(mode="json"):
         raise ValueError("Frozen model risk settings do not match the forward config")
+    if model.get("point_in_time_settings") != config.point_in_time.model_dump(mode="json"):
+        raise ValueError("Frozen model point-in-time settings do not match the forward config")
+    if model.get("factor_implementation_version") != FACTOR_IMPLEMENTATION_VERSION:
+        raise ValueError("Frozen model factor implementation version is no longer supported")
     expected_market_contract = {
         "provider": config.data.provider,
         "interval": config.data.interval,
@@ -213,13 +234,43 @@ def build_forward_predictions(
     validate_frozen_model(model, config)
     if sorted(data) != sorted(model["symbols"]):
         raise ValueError("Forward market symbols do not match the frozen model contract")
+    end_by_symbol = {
+        symbol: pd.Timestamp(value)
+        for symbol, value in model["research_data_end_by_symbol"].items()
+    }
+    prefix = {
+        symbol: frame.loc[frame.index <= end_by_symbol[symbol]]
+        for symbol, frame in data.items()
+    }
+    if data_fingerprint(prefix) != model["market_data_prefix_sha256"]:
+        raise ValueError("Forward market data changed inside the frozen research prefix")
+    research_data_end = pd.Timestamp(model["research_data_end"])
+    expected_point_prefix = model.get("point_in_time_prefix_sha256")
+    actual_point_prefix = (
+        point_in_time.fingerprint(research_data_end) if point_in_time is not None else None
+    )
+    if actual_point_prefix != expected_point_prefix:
+        raise ValueError("Forward point-in-time data changed inside the frozen research prefix")
+    current_source_provider = {
+        symbol: frame.attrs.get("source_provider") for symbol, frame in data.items()
+    }
+    if current_source_provider != model["market_source_provider_by_symbol"]:
+        raise ValueError("Forward market source providers changed from the frozen contract")
+    current_parser_version = {
+        symbol: frame.attrs.get("source_parser_version") for symbol, frame in data.items()
+    }
+    if current_parser_version != model["market_source_parser_version_by_symbol"]:
+        raise ValueError("Forward market parser versions changed from the frozen contract")
     panel = build_factor_panel(data, point_in_time)
     panel, _ = generate_discovery_factors(panel, dict(FACTOR_DEFINITIONS), config.discovery)
     missing = set(model["selected_features"]) - set(panel)
     if missing:
         raise ValueError(f"Forward panel is missing frozen factors: {sorted(missing)}")
-    freeze_time = pd.Timestamp(model["freeze_available_time"])
-    forward = panel.loc[panel["_feature_time"] > freeze_time].copy()
+    common_forward_end = min(frame.index[-1] for frame in data.values())
+    forward = panel.loc[
+        (panel["_feature_time"] > research_data_end)
+        & (panel["_feature_time"] <= common_forward_end)
+    ].copy()
     if forward.empty:
         columns = [
             "_feature_time",
@@ -230,9 +281,38 @@ def build_forward_predictions(
             "probability",
             "estimated_swap_r",
             "estimated_cost_r",
+            "estimated_scenario_cost_r",
+            "financing_cost_known",
+            "financing_source",
+            "expected_gross_r",
+            "expected_scenario_r",
             "expected_net_r",
         ]
         return pd.DataFrame(columns=columns), []
+    external_families = {"carry", "positioning"}
+    external_primitives = {
+        name
+        for name, definition in FACTOR_DEFINITIONS.items()
+        if definition.family in external_families
+    }
+    external_selected: list[str] = []
+    for item in model["selected_feature_catalog"]:
+        raw_parents = item.get("parents")
+        parents = set(raw_parents) if isinstance(raw_parents, list | tuple) else set()
+        if item.get("family") in external_families or parents & external_primitives:
+            external_selected.append(str(item["name"]))
+    external_coverage = (
+        float(forward[external_selected].notna().all(axis=1).mean())
+        if external_selected
+        else 1.0
+    )
+    if external_coverage < config.factor.minimum_forward_external_feature_coverage:
+        raise ValueError(
+            "Forward external-factor coverage is below the frozen minimum: "
+            f"{external_coverage:.1%}"
+        )
+    if external_selected:
+        forward = forward.dropna(subset=external_selected)
     rows: list[pd.DataFrame] = []
     directional = set(model["directional_features"])
     for direction in (-1, 1):
@@ -262,5 +342,11 @@ def build_forward_predictions(
         float(model["target_mean_r"]),
         float(model["non_target_mean_r"]),
     )
+    scored.attrs["external_feature_coverage"] = external_coverage
+    scored.attrs["external_selected_features"] = external_selected
+    scored.attrs["selected_feature_coverage"] = {
+        feature: float(forward[feature].notna().mean())
+        for feature in model["selected_features"]
+    }
     signals = _signals_from_predictions(scored, config.factor, fold=0)
     return scored, signals
