@@ -16,6 +16,7 @@
 | [Backtesting.py](https://github.com/kernc/backtesting.py) | 8,674 | AGPL-3.0 | 未采用 | 适合单资产研究，不适合本系统共享货币敞口的核心要求 |
 | [vectorbt](https://github.com/polakowo/vectorbt) | 8,310 | 仓库 API 未识别 | 未作为核心 | 参数扫描很强，但事件级组合 FX 风控仍需大量旁路逻辑 |
 | [Zipline](https://github.com/quantopian/zipline) | 19,974 | Apache-2.0 | 未采用 | 上游更新慢，FX/broker 语义不是其强项 |
+| [arch 8.0.0](https://github.com/bashtage/arch/tree/038d78b709e75f2590890757af32705817a6fad8) | — | NCSA | 仅作交叉核验 | 官方 SPA 的 `studentize` 参数未进入计算路径，退化输入还可返回 p=0；不能直接作为正式 Hansen studentized SPA，项目采用透明内部实现 |
 
 此外直接使用 pandas、NumPy、Pydantic、Typer、Rich、HTTPX、pytest 和 Ruff；它们分别承担
 表格计算、数值计算、配置不变量、CLI、终端报告、practice HTTP、测试与静态检查。项目自研的
