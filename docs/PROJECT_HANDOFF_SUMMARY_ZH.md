@@ -1,5 +1,44 @@
 # 外汇量化研究项目交接与后续执行计划（草案）
 
+## 2026-08-02 状态更新（最新；下方 2026-07-16 正文保留作历史）
+
+**数据接收（WP1）已闭环：** Dukascopy 14 品种正式行情库全部到位，通过本仓库 formal intake 合同：
+`verdict=formal_ready`、`formal_ready=14/14`、慢周期 12/12、FIX-W 9/9、`full_intake_ready=true`。
+- 目录 `data/dukascopy_sqlite_fresh_20160101_20260101_v111/`（≈18.95 GiB），区间 `[2016-01-01, 2026-01-01)`，
+  下载器 v1.1.1（commit `63ee417`），逐 payload deep verify 全过。
+- 新 intake ledger：`outputs/dukascopy_intake/intake_ledger_fresh_v111_20260802.json`（旧 `intake_ledger.json` 保留作历史）。
+- 验证报告：`docs/PROJECT_STATUS_20260802_INTAKE_VERIFIED_ZH.md`。
+
+**G0 深度微观结构审计（WP2）进行中：** `scripts/audit_dukascopy_sqlite.py` 逐库 tick 级审计，后台串行。
+截至本更新已 PASS：EURUSD/GBPUSD/USDJPY/USDCHF/AUDUSD/NZDUSD/USDCAD（7/14，零 issues，含压力期复核），
+产物 `outputs/dukascopy_audit_fresh_v111_20260802/`。G0 全部 PASS 后叠到共同覆盖 manifest 给出 WP2 收尾。
+
+**共同覆盖（WP2 小时维度，已产出）：** `outputs/fresh14_common_coverage_20260802/`。
+小时级共同 ok = 98.55%（全14）；纽约 17:00 ET 收盘日线共同覆盖 = 79.0%（缺口成因与处理方案见
+`docs/NY_CLOSE_DAILY_COVERAGE_DESIGN_ZH.md`，是 WP6 冻结前硬设计点）。
+
+**成本（WP3）决策：** 目标 broker 定为 **Interactive Brokers**。账户持有人尚无 IBKR 账户，
+故路径 C（Flex Query 账户历史）不可行；正式成本合同只能靠路径 B（商业数据付费）解锁，
+否则只能合成（`software_fixture`，仅研究）。战略决定：暂不做满 IB 合成（YAGNI），OANDA 合成够撑软件链。
+详见 `docs/IBKR_COST_ACQUISITION_PLAN_ZH.md`。正式净收益维持 `cost_incomplete_research_only`。
+
+**工程可恢复性（WP0）已解决：** 仓库已上云 → **https://github.com/jlcbk/fx-trading-system**（public，jlcbk 账号）。
+git 历史从「无 remote + 158 条裸改动」收敛为干净 4-commit 历史；19 GiB 行情库靠 sidecar SHA 可重抓，
+M1 离线归档在 `/Users/open/fx-trading-system-archives/m1_intake_ready_20260802T134229Z/`。
+
+**不变的固定安全状态：**
+```text
+approved_strategy = false   trading_approval = false
+formal_net_returns_ready = false   fresh_forward_required = true
+return_labels_opened = false（新14库与第二层均未打开）
+```
+
+**接手 Agent 的下一项：** 等 G0 14/14 PASS → 叠 tick 级结论到共同覆盖 manifest（WP2 收尾）→
+WP6 outcome-blind 冻结（含上面 NY-close 缺口方案的预注册选定）→ 单次授权打开收益标签做预注册检验。
+成本侧等「出现值得验证的候选」再决策商业数据。
+
+---
+
 更新日期：2026-07-16
 
 M0 进度（2026-07-16）：NEXT-01/02/03 完成。离线归档
