@@ -33,6 +33,9 @@
 | P0 | `docs/PROJECT_HANDOFF_SUMMARY_ZH.md` | 项目状态；**顶部「2026-08-02 更新」=最新**，下方 7-16 正文=历史 |
 | P0 | `docs/PROJECT_STATUS_20260802_INTAKE_VERIFIED_ZH.md` | intake 验证 + 只读复核清单（每项有命令+判据） |
 | P1 | `docs/IBKR_COST_ACQUISITION_PLAN_ZH.md` | 成本数据路径（broker=IBKR，无账户） |
+| P1 | `docs/RESEARCH_FIXED_COST_ASSUMPTIONS_ZH.md` | **研究用固定成本假设**（software_fixture；可 research-net） |
+| P1 | `configs/research_fixed_costs.yaml` | 机读成本假设 |
+| P1 | `configs/long_horizon_dukascopy_research_costs.yaml` | 新 14 库 + 研究成本的慢周期配置 |
 | P1 | `docs/NY_CLOSE_DAILY_COVERAGE_DESIGN_ZH.md` | WP6 冻结前硬设计点（日线覆盖缺口） |
 | P1 | `outputs/dukascopy_intake/intake_ledger_fresh_v111_20260802.json` | 数据合同状态机（`verdict`/`formal_ready`） |
 | P1 | `outputs/dukascopy_audit_fresh_v111_20260802/G0_UNIVERSE_CLOSURE.json` | **G0 全宇宙收尾**（14/14 PASS，门禁+逐品种摘要；不在 git，仅本机） |
@@ -75,8 +78,10 @@ price_only round1        = invalidated_but_data_inspected （不可恢复）
   （零 error/warning/crossed/sha_mismatch/lzma_err/ts_regression/missing；总 tick ≈ 41.01 亿）。
 - ✅ **共同覆盖（WP2 小时维度）已产出**：`outputs/fresh14_common_coverage_20260802/`
   （小时共同 ok 98.55%；纽约收盘日线 79%）。
-- ⛔ **成本（WP3）阻塞**：broker=IBKR，账户持有人无账户 → 正式成本只能靠商业数据付费；否则只能合成（仅研究）。
-- ⏭ **下一步**：WP6 outcome-blind 冻结（含 NY-close 方案预注册选定）→ 用户单次授权打开收益标签。
+- ⚠️ **成本（WP3）**：正式门仍阻塞（无 IB 账户/无商业历史）。**研究层固定成本已启用**
+  （`docs/RESEARCH_FIXED_COST_ASSUMPTIONS_ZH.md` + `data/research_costs/broker_financing_research_fixed_v1.csv`，
+  `software_fixture`）。可算 research-net；`formal_net_returns_ready=false`。
+- ⏭ **下一步**：WP6 outcome-blind 冻结（含 NY-close 方案 + 本成本假设预注册）→ 用户单次授权打开收益标签。
 
 ## 5. 运行环境
 

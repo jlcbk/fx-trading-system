@@ -20,10 +20,13 @@
 小时级共同 ok = 98.55%（全14）；纽约 17:00 ET 收盘日线共同覆盖 = 79.0%（缺口成因与处理方案见
 `docs/NY_CLOSE_DAILY_COVERAGE_DESIGN_ZH.md`，是 WP6 冻结前硬设计点）。
 
-**成本（WP3）决策：** 目标 broker 定为 **Interactive Brokers**。账户持有人尚无 IBKR 账户，
-故路径 C（Flex Query 账户历史）不可行；正式成本合同只能靠路径 B（商业数据付费）解锁，
-否则只能合成（`software_fixture`，仅研究）。战略决定：暂不做满 IB 合成（YAGNI），OANDA 合成够撑软件链。
-详见 `docs/IBKR_COST_ACQUISITION_PLAN_ZH.md`。正式净收益维持 `cost_incomplete_research_only`。
+**成本（WP3）决策 + 研究层启用：** 目标 broker 定为 **Interactive Brokers**。账户持有人尚无 IBKR 账户，
+故路径 C（Flex Query 账户历史）不可行；正式成本合同只能靠路径 B（商业数据付费）解锁。
+**2026-08-03：已落地研究用固定成本假设**（`docs/RESEARCH_FIXED_COST_ASSUMPTIONS_ZH.md`，
+`configs/research_fixed_costs.yaml`，融资 schedule
+`data/research_costs/broker_financing_research_fixed_v1.csv`，`quote_quality=software_fixture`）。
+cost-coverage-audit 覆盖率 1.0，verdict 仍为 **`cost_incomplete_research_only`**（正确 fail closed）。
+研究可报 gross / research-net / formal-net=N/A；**不**解锁交易批准。
 
 **工程可恢复性（WP0）已解决：** 仓库已上云 → **https://github.com/jlcbk/fx-trading-system**（public，jlcbk 账号）。
 git 历史从「无 remote + 158 条裸改动」收敛为干净 4-commit 历史；19 GiB 行情库靠 sidecar SHA 可重抓，
