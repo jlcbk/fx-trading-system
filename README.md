@@ -1,5 +1,11 @@
 # FX Portfolio System
 
+> 🤖 **AI agent 请先读 [`AGENTS.md`](./AGENTS.md)。** 那里有项目使用说明、当前状态、红线、运行环境与关键命令。
+> 本 README 是人向功能介绍，**可能滞后于实际进展**（例如仍写 7 品种，实际已 14 品种）；
+> 一切以 `AGENTS.md` 和 [`docs/PROJECT_HANDOFF_SUMMARY_ZH.md`](./docs/PROJECT_HANDOFF_SUMMARY_ZH.md) 顶部「2026-08-02 更新」节为准。
+>
+> 一句话现状：**外汇量化因子挖掘研究系统（本地基础设施），14 品种 Dukascopy 行情已通过正式 intake；尚未批准任何交易策略。**
+
 一个面向常见外汇货币对的本地研究、组合回测、策略筛选和模拟交易系统。系统默认交易
 `EURUSD / GBPUSD / USDJPY / USDCHF / AUDUSD / NZDUSD / USDCAD`，强调低目标/止损比、
 周内持仓和跨货币组合风控。
