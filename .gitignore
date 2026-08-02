@@ -13,3 +13,13 @@ data/*.parquet
 data/**
 outputs/*
 !outputs/.gitkeep
+
+# Research raw acquisitions (copyrighted bulk; not for public repo)
+research/_pdfs/
+research/_html_snapshots/
+research/agent/cache/
+research/**/_pdfs/
+research/**/_html_snapshots/
+*.bi5
+*.sqlite
+*.sqlite.*
