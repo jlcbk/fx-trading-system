@@ -9,9 +9,12 @@
 - 新 intake ledger：`outputs/dukascopy_intake/intake_ledger_fresh_v111_20260802.json`（旧 `intake_ledger.json` 保留作历史）。
 - 验证报告：`docs/PROJECT_STATUS_20260802_INTAKE_VERIFIED_ZH.md`。
 
-**G0 深度微观结构审计（WP2）进行中：** `scripts/audit_dukascopy_sqlite.py` 逐库 tick 级审计，后台串行。
-截至本更新已 PASS：EURUSD/GBPUSD/USDJPY/USDCHF/AUDUSD/NZDUSD/USDCAD（7/14，零 issues，含压力期复核），
-产物 `outputs/dukascopy_audit_fresh_v111_20260802/`。G0 全部 PASS 后叠到共同覆盖 manifest 给出 WP2 收尾。
+**G0 深度微观结构审计（WP2）已闭环：14/14 PASS。** 产物
+`outputs/dukascopy_audit_fresh_v111_20260802/`（每库 `*_dukascopy_audit.json` +
+`G0_UNIVERSE_CLOSURE.json` / `G0_UNIVERSE_CLOSURE_ZH.md`）。
+零 error、零 warning、零 crossed quote、零 sha256 mismatch、零 lzma error、
+零 timestamp regression、零 missing hours；总 tick ≈ **41.01 亿**。
+全 14 / 慢周期 12 / FIX-W 9 研究宇宙全部就绪。**不打开收益标签，不批准交易。**
 
 **共同覆盖（WP2 小时维度，已产出）：** `outputs/fresh14_common_coverage_20260802/`。
 小时级共同 ok = 98.55%（全14）；纽约 17:00 ET 收盘日线共同覆盖 = 79.0%（缺口成因与处理方案见
@@ -33,8 +36,8 @@ formal_net_returns_ready = false   fresh_forward_required = true
 return_labels_opened = false（新14库与第二层均未打开）
 ```
 
-**接手 Agent 的下一项：** 等 G0 14/14 PASS → 叠 tick 级结论到共同覆盖 manifest（WP2 收尾）→
-WP6 outcome-blind 冻结（含上面 NY-close 缺口方案的预注册选定）→ 单次授权打开收益标签做预注册检验。
+**接手 Agent 的下一项：** WP2 已收尾。下一步是 **WP6 outcome-blind 冻结**
+（含 NY-close 缺口方案的预注册选定）→ 用户单次授权后打开收益标签做预注册检验。
 成本侧等「出现值得验证的候选」再决策商业数据。
 
 ---

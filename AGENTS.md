@@ -35,6 +35,8 @@
 | P1 | `docs/IBKR_COST_ACQUISITION_PLAN_ZH.md` | 成本数据路径（broker=IBKR，无账户） |
 | P1 | `docs/NY_CLOSE_DAILY_COVERAGE_DESIGN_ZH.md` | WP6 冻结前硬设计点（日线覆盖缺口） |
 | P1 | `outputs/dukascopy_intake/intake_ledger_fresh_v111_20260802.json` | 数据合同状态机（`verdict`/`formal_ready`） |
+| P1 | `outputs/dukascopy_audit_fresh_v111_20260802/G0_UNIVERSE_CLOSURE.json` | **G0 全宇宙收尾**（14/14 PASS，门禁+逐品种摘要；不在 git，仅本机） |
+| P1 | `outputs/dukascopy_audit_fresh_v111_20260802/G0_UNIVERSE_CLOSURE_ZH.md` | G0 收尾中文报告 |
 | P1 | `research/AGENTS.md` | **查文献/知识库走这里**（30秒路由、L3 索引、笔记优先） |
 | P2 | `outputs/research_registry_audit.json` | 研究注册表（已披露假设/因子/检验数） |
 | P2 | `docs/PRICE_ONLY_ROUND1_FINAL_REMEDIATION_HANDOFF_ZH.md` | 第一轮为何被验收否决（不可恢复） |
@@ -57,7 +59,7 @@ price_only round1        = invalidated_but_data_inspected （不可恢复）
 
 ### 3.2 数据纪律
 
-1. **不打开收益标签**，除非：G0 14 库全 PASS + WP6 outcome-blind 冻结 + 用户单次授权。三者缺一不可。
+1. **不打开收益标签**，除非：G0 14 库全 PASS（✅ 已满足）+ WP6 outcome-blind 冻结 + 用户单次授权。后两者缺一不可。
 2. **不用 mid-only / 政策利率 / 合成远期 / Yahoo 冒充真实 broker 成本。** 合成只能标 `software_fixture`，仅研究。
 3. **不删除失败品种静默缩小研究宇宙**；失败要写进 manifest。
 4. **不在结果出来后改 cut-off / 因子 / 阈值 / 成本假设。** 选定动作必须在 WP6 冻结时完成。
@@ -65,13 +67,16 @@ price_only round1        = invalidated_but_data_inspected （不可恢复）
 6. **2016–2025 是 reused-history，不是 untouched holdout。** forward 必须严格晚于 alpha freeze。
 7. **写入边界：** 工程/文档改动（`src/` `configs/` `docs/` `scripts/` `tests/`）可做并提交；**交易/收益/成本相关状态字段（§3.1）不得擅自改判**，需用户明确授权。
 
-## 4. 当前状态与阻塞（2026-08-02）
+## 4. 当前状态与阻塞（2026-08-02，G0 收尾后）
 
 - ✅ **数据接收（WP1）已闭环**：14 品种 formal intake `formal_ready`，deep verify 全过。
-- 🔄 **G0 微观结构审计（WP2）**：查 `outputs/dukascopy_audit_fresh_v111_20260802/_audit_run_summary.txt` 确认进度（本文件写成时 7/14 PASS）。
-- ✅ **共同覆盖（WP2 小时维度）已产出**：`outputs/fresh14_common_coverage_20260802/`（小时共同 ok 98.55%；纽约收盘日线 79%）。
+- ✅ **G0 微观结构审计（WP2）已闭环：14/14 PASS**。产物
+  `outputs/dukascopy_audit_fresh_v111_20260802/G0_UNIVERSE_CLOSURE.json`
+  （零 error/warning/crossed/sha_mismatch/lzma_err/ts_regression/missing；总 tick ≈ 41.01 亿）。
+- ✅ **共同覆盖（WP2 小时维度）已产出**：`outputs/fresh14_common_coverage_20260802/`
+  （小时共同 ok 98.55%；纽约收盘日线 79%）。
 - ⛔ **成本（WP3）阻塞**：broker=IBKR，账户持有人无账户 → 正式成本只能靠商业数据付费；否则只能合成（仅研究）。
-- ⏭ **下一步**：G0 14/14 PASS → 叠 tick 结论到共同覆盖 manifest（WP2 收尾）→ WP6 冻结（含 NY-close 方案预注册选定）→ 单次授权打开收益标签。
+- ⏭ **下一步**：WP6 outcome-blind 冻结（含 NY-close 方案预注册选定）→ 用户单次授权打开收益标签。
 
 ## 5. 运行环境
 

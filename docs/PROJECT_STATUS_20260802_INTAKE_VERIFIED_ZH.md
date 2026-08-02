@@ -12,7 +12,10 @@
 ## 0. 一句话结论
 
 - **Dukascopy 14 品种正式行情库已下载完成，并通过本仓库的 formal intake 合同：`verdict=formal_ready`、`full_intake_ready=true`、14/14 formal-ready、慢周期 12/12、FIX-W 9/9。** 这是相对 `outputs/dukascopy_intake/intake_ledger.json`（2026-07-16，`intake_incomplete`、0/14、指向旧目录）的实质推进。
-- 但 **G0 分角色/全宇宙深度微观结构审计正在新 14 库上运行**（后台，2026-08-02 13:41Z 启动，截至本文档更新 4/14 已 PASS：EURUSD/GBPUSD/USDJPY/USDCHF，节奏 ~10–19 分钟/库，剩 ~2–2.5 小时；产物 `outputs/dukascopy_audit_fresh_v111_20260802/`），且 **历史真实成本未齐**、**无获批策略**。
+- **G0 分角色/全宇宙深度微观结构审计已闭环：14/14 PASS**（产物
+  `outputs/dukascopy_audit_fresh_v111_20260802/G0_UNIVERSE_CLOSURE.json`；
+  零 error/warning/crossed/sha_mismatch/lzma_err/ts_regression/missing；总 tick ≈ 41.01 亿）。
+  **历史真实成本仍未齐**、**无获批策略**。
 - 项目仍处于「研究基础设施成熟 + 正式行情数据合同已闭环；G0 深度审计与 outcome-blind 冻结未在新库上执行」阶段，**未进入真实资金或获准 practice**。
 
 ---
@@ -79,9 +82,10 @@ PY
 
 ## 3. 还没做（intake 之外、尚未在新库闭环的事项）
 
-1. **G0 分角色深度微观结构审计（WP2）未在新 14 库运行。**
-   `outputs/dukascopy_audit/` 目前只有 `EURUSD_dukascopy_audit.json`、`GBPUSD_dukascopy_audit.json`（2026-07-16，基于**旧 1.0 库**）。新 14 库需要用 `scripts/audit_dukascopy_sqlite.py` 逐库跑 tick/点差/gap/小时覆盖/异常复核，再产出慢周期 12 对与 FIX-W 9 腿的「共同覆盖 + session 抑制」universe manifest。
-   intake 合同（区间/sidecar/manifest/transfer）≠ G0 微观结构审计；二者都过才算研究宇宙就绪。
+1. **G0 分角色深度微观结构审计（WP2）已在新 14 库闭环：14/14 PASS。**
+   产物 `outputs/dukascopy_audit_fresh_v111_20260802/`（每库 audit + `G0_UNIVERSE_CLOSURE.json`）。
+   旧 `outputs/dukascopy_audit/` 仍是 2026-07-16 旧 1.0 库的历史报告，勿混用。
+   共同覆盖见 `outputs/fresh14_common_coverage_20260802/`。
 2. **历史真实成本未齐（WP3）。** 目标 broker 已定为 **Interactive Brokers (IBKR)**（2026-08-02 决策，实体待开户时确认）。关键约束：**账户持有人尚无 IBKR 账户**，因此路径 C（账户 Flex Query 导出历史融资）天然不可行；正式成本合同只能靠路径 B（买 Bloomberg/Refinitiv 商业历史 swap）解锁，否则只能走路径 A（合成，仅 `software_fixture`/研究口径）。详见 `docs/IBKR_COST_ACQUISITION_PLAN_ZH.md`。
    - 战略决定（2026-08-02）：**暂不做满 IB 合成**。理由：成本是「有候选之后」才用得上，当前无候选，先投入合成是 YAGNI；OANDA 合成（`factors_carry_synthetic`、`convert_oanda_financing_to_cost_contract.py`）已能让软件链和成本压力测试跑通。路径 B 商业数据购买推迟到「出现值得验证的候选」时再决策。
    - `official_rates` 已覆盖 6 币种（USD/EUR/GBP/CAD/AUD/CHF），缺 JPY/NZD/NOK/SEK（做满合成时补）。
