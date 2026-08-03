@@ -413,6 +413,7 @@ def long_horizon_freeze_sqlite(
     transfer_manifest: Annotated[
         Path | None, typer.Option("--transfer-manifest")
     ] = None,
+    checkpoint: Annotated[Path | None, typer.Option("--checkpoint")] = None,
     output: Annotated[Path, typer.Option("--output", "-o")] = Path(
         "outputs/long_horizon_dukascopy_freeze"
     ),
@@ -425,6 +426,8 @@ def long_horizon_freeze_sqlite(
     requested_end = end or parsed.data.end
     if requested_end is None:
         raise typer.BadParameter("--end or config.data.end is required and exclusive")
+    if checkpoint is not None:
+        console.print(f"Resume checkpoint enabled: {checkpoint}")
     console.print(
         "Verifying transferred SQLite and freezing factor-only next-open target schedules…"
     )
@@ -436,6 +439,7 @@ def long_horizon_freeze_sqlite(
         end=requested_end,
         registry_path=registry,
         transfer_manifest_path=transfer_manifest,
+        checkpoint_path=checkpoint,
     )
     destination = write_long_horizon_candidate_freeze_artifacts(result, output)
     table = Table(title="Slow-horizon factor-only freeze")

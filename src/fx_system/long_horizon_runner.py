@@ -660,6 +660,7 @@ def run_long_horizon_candidate_freeze_from_sqlite(
     end: date | datetime | str,
     registry_path: str | Path,
     transfer_manifest_path: str | Path | None = None,
+    checkpoint_path: str | Path | None = None,
 ) -> LongHorizonCandidateFreezeResult:
     """Run the maximum safe pre-portfolio stage over verified SQLite inputs."""
 
@@ -672,6 +673,7 @@ def run_long_horizon_candidate_freeze_from_sqlite(
         start,
         end,
         transfer_manifest_path=transfer_manifest_path,
+        checkpoint_path=checkpoint_path,
     )
     common_daily = build_common_daily_data(daily_run)
     build = _build_factor_only(common_daily, config)

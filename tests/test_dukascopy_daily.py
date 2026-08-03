@@ -548,3 +548,72 @@ def test_daily_cache_fails_closed_on_cache_or_source_receipt_change(tmp_path: Pa
         connection.execute("INSERT INTO metadata VALUES ('post_cache_change', '1')")
     with pytest.raises(TransferIntegrityError, match="size|SHA-256"):
         load_dukascopy_daily_cache(cache, root, transfer_manifest_path=manifest)
+
+
+def test_daily_checkpoint_resumes_and_matches_full_run(tmp_path: Path) -> None:
+    symbols = ("EURUSD", "GBPUSD")
+    session_dates = (date(2025, 1, 5), date(2025, 1, 6))
+    root = tmp_path / "sqlite"
+    manifest = _write_databases(root, symbols, session_dates)
+    end = date(2025, 1, 7)
+
+    full = run_dukascopy_daily_from_sqlite(
+        root, symbols, session_dates[0], end, transfer_manifest_path=manifest
+    )
+
+    checkpoint = tmp_path / "daily_checkpoint.sqlite"
+    run_dukascopy_daily_from_sqlite(
+        root,
+        symbols,
+        session_dates[0],
+        end,
+        transfer_manifest_path=manifest,
+        checkpoint_path=checkpoint,
+    )
+    assert checkpoint.is_file()
+    # Second run with the same checkpoint must not re-decode: same result, fast.
+    import sqlite3 as _sqlite3
+
+    rows_before = _sqlite3.connect(checkpoint).execute(
+        "SELECT COUNT(*) FROM session_checkpoint"
+    ).fetchone()[0]
+    assert rows_before == len(symbols) * len(session_dates)
+
+    resumed = run_dukascopy_daily_from_sqlite(
+        root,
+        symbols,
+        session_dates[0],
+        end,
+        transfer_manifest_path=manifest,
+        checkpoint_path=checkpoint,
+    )
+    rows_after = _sqlite3.connect(checkpoint).execute(
+        "SELECT COUNT(*) FROM session_checkpoint"
+    ).fetchone()[0]
+    assert rows_after == rows_before  # no new decoding happened
+
+    # Resumed audit/daily must equal the no-checkpoint full run.
+    pdt.assert_frame_equal(
+        resumed.session_audit.reset_index(drop=True),
+        full.session_audit.reset_index(drop=True),
+        check_exact=False,
+    )
+    for symbol in symbols:
+        pdt.assert_frame_equal(
+            resumed.daily_data[symbol].sort_index(),
+            full.daily_data[symbol].sort_index(),
+            check_exact=False,
+        )
+
+    # A changed source SHA invalidates the cached session for that symbol.
+    with _sqlite3.connect(root / "EURUSD.sqlite") as connection:
+        connection.execute("INSERT INTO metadata VALUES ('source_change', '1')")
+    with pytest.raises(TransferIntegrityError, match="size|SHA-256"):
+        run_dukascopy_daily_from_sqlite(
+            root,
+            symbols,
+            session_dates[0],
+            end,
+            transfer_manifest_path=manifest,
+            checkpoint_path=checkpoint,
+        )

@@ -15,6 +15,9 @@ converted to gaps.
 
 from __future__ import annotations
 
+import json
+import math
+import sqlite3
 from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
@@ -205,6 +208,131 @@ def _daily_attrs(
     }
 
 
+def _checkpoint_serialize(value: object) -> object:
+    """JSON-safe form for a daily record/audit field (Timestamp/NaT/np/date types)."""
+    if isinstance(value, pd.Timestamp):
+        return None if pd.isna(value) else value.isoformat()
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, date):
+        return value.isoformat()
+    if value is None:
+        return None
+    if isinstance(value, float) and math.isnan(value):
+        return None
+    if isinstance(value, np.generic):
+        value = value.item()
+        return None if isinstance(value, float) and math.isnan(value) else value
+    if isinstance(value, (list, tuple)):
+        return [_checkpoint_serialize(item) for item in value]
+    if isinstance(value, dict):
+        return {str(key): _checkpoint_serialize(val) for key, val in value.items()}
+    return value
+
+
+def _checkpoint_open(path: Path) -> sqlite3.Connection:
+    """Open (create) the per-session resume checkpoint."""
+    connection = sqlite3.connect(path)
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS session_checkpoint (
+            symbol TEXT NOT NULL,
+            session_date TEXT NOT NULL,
+            database_sha256 TEXT NOT NULL,
+            record_json TEXT,
+            audit_json TEXT NOT NULL,
+            PRIMARY KEY (symbol, session_date)
+        )
+        """
+    )
+    connection.commit()
+    return connection
+
+
+def _checkpoint_restore_timestamp(value: object) -> object:
+    if value is None:
+        return pd.NaT
+    return pd.Timestamp(value)
+
+
+def _checkpoint_restore_record(record: dict[str, object]) -> dict[str, object]:
+    """Restore native types (Timestamp/float) from a JSON-serialized record."""
+    restored = dict(record)
+    for key in ("timestamp", "session_open_quote_time", "session_close_quote_time"):
+        if key in restored:
+            restored[key] = _checkpoint_restore_timestamp(restored[key])
+    return restored
+
+
+def _checkpoint_restore_audit(audit: dict[str, object]) -> dict[str, object]:
+    """Restore native types (date/Timestamp/float) from a JSON-serialized audit."""
+    restored = dict(audit)
+    for key in ("session_start_local_date", "session_end_local_date"):
+        if key in restored and restored[key] is not None:
+            restored[key] = date.fromisoformat(str(restored[key]))
+    for key in ("session_start_utc", "session_end_utc"):
+        if key in restored:
+            restored[key] = _checkpoint_restore_timestamp(restored[key])
+    for key in ("session_open_quote_time", "session_close_quote_time"):
+        if key in restored:
+            restored[key] = _checkpoint_restore_timestamp(restored[key])
+    for key in ("open_quote_delay_seconds", "close_quote_age_seconds"):
+        if key in restored and restored[key] is None:
+            restored[key] = np.nan
+    return restored
+
+
+def _checkpoint_load(
+    connection: sqlite3.Connection,
+    symbols: tuple[str, ...],
+    receipts: dict[str, DatabaseTransferVerification],
+) -> dict[tuple[str, str], tuple[dict[str, object] | None, dict[str, object]]]:
+    """Return cached (record, audit) for sessions whose source SHA still matches."""
+    cached: dict[tuple[str, str], tuple[dict[str, object] | None, dict[str, object]]] = {}
+    for symbol in symbols:
+        expected_sha = receipts[symbol].sha256
+        rows = connection.execute(
+            "SELECT session_date, database_sha256, record_json, audit_json "
+            "FROM session_checkpoint WHERE symbol = ?",
+            (symbol,),
+        ).fetchall()
+        for session_date, stored_sha, record_json, audit_json in rows:
+            if stored_sha != expected_sha:
+                continue  # source DB changed -> redo this session
+            record = (
+                _checkpoint_restore_record(json.loads(record_json))
+                if record_json
+                else None
+            )
+            audit = _checkpoint_restore_audit(json.loads(audit_json))
+            cached[(symbol, session_date)] = (record, audit)
+    return cached
+
+
+def _checkpoint_store(
+    connection: sqlite3.Connection,
+    *,
+    symbol: str,
+    session_date: date,
+    database_sha256: str,
+    record: dict[str, object] | None,
+    audit: dict[str, object],
+) -> None:
+    connection.execute(
+        "INSERT OR REPLACE INTO session_checkpoint "
+        "(symbol, session_date, database_sha256, record_json, audit_json) "
+        "VALUES (?, ?, ?, ?, ?)",
+        (
+            symbol,
+            session_date.isoformat(),
+            database_sha256,
+            json.dumps(_checkpoint_serialize(record)) if record is not None else None,
+            json.dumps(_checkpoint_serialize(audit)),
+        ),
+    )
+    connection.commit()
+
+
 def run_dukascopy_daily_from_sqlite(
     database_directory: str | Path,
     symbols: Iterable[str],
@@ -212,6 +340,7 @@ def run_dukascopy_daily_from_sqlite(
     end: date | datetime | str,
     *,
     transfer_manifest_path: str | Path | None = None,
+    checkpoint_path: str | Path | None = None,
 ) -> DukascopyDailyRun:
     """Build 17:00-New-York daily bid/ask bars from transferred SQLite files.
 
@@ -260,12 +389,25 @@ def run_dukascopy_daily_from_sqlite(
             }
         )
 
+    checkpoint_connection: sqlite3.Connection | None = None
+    cached: dict[tuple[str, str], tuple[dict[str, object] | None, dict[str, object]]] = {}
+    if checkpoint_path is not None:
+        checkpoint_connection = _checkpoint_open(Path(checkpoint_path))
+        cached = _checkpoint_load(checkpoint_connection, normalized_symbols, receipts)
+
     records_by_symbol: dict[str, list[dict[str, object]]] = {
         symbol: [] for symbol in normalized_symbols
     }
     audit_rows: list[dict[str, object]] = []
     for symbol, receipt in receipts.items():
         for session_date in session_dates:
+            cache_key = (symbol, session_date.isoformat())
+            if cache_key in cached:
+                record, audit = cached[cache_key]
+                audit_rows.append(audit)
+                if record is not None:
+                    records_by_symbol[symbol].append(record)
+                continue
             bounds = fx_session_bounds(session_date)
             start_utc = pd.Timestamp(bounds.start_utc)
             end_utc = pd.Timestamp(bounds.end_utc)
@@ -292,6 +434,7 @@ def run_dukascopy_daily_from_sqlite(
                 close_quote_age_seconds = float(
                     (end_utc - close_quote_time).total_seconds()
                 )
+            record: dict[str, object] | None = None
             if not window.complete:
                 emitted = False
                 suppression_reason: str | None = "missing_source_hours"
@@ -312,40 +455,47 @@ def run_dukascopy_daily_from_sqlite(
             else:
                 emitted = True
                 suppression_reason = None
-                records_by_symbol[symbol].append(
-                    _aggregate_complete_session(window.ticks, end_utc)
+                record = _aggregate_complete_session(window.ticks, end_utc)
+                records_by_symbol[symbol].append(record)
+            audit = {
+                "symbol": symbol,
+                "session_start_local_date": session_date,
+                "session_end_local_date": session_date + timedelta(days=1),
+                "session_start_utc": start_utc,
+                "session_end_utc": end_utc,
+                "elapsed_hours": (end_utc - start_utc).total_seconds() / 3600,
+                "expected_hour_count": len(window.expected_hours_utc),
+                "decoded_hour_count": len(window.decoded_hours_utc),
+                "no_data_hour_count": len(window.no_data_hours_utc),
+                "missing_hour_count": len(window.missing_hours_utc),
+                "missing_hours": "|".join(
+                    value.isoformat() for value in window.missing_hours_utc
+                ),
+                "payload_hashes_verified": window.payload_hashes_verified,
+                "duplicate_timestamps_removed": window.duplicate_timestamps_removed,
+                "tick_count": len(window.ticks),
+                "session_open_quote_time": open_quote_time,
+                "session_close_quote_time": close_quote_time,
+                "open_quote_delay_seconds": open_quote_delay_seconds,
+                "close_quote_age_seconds": close_quote_age_seconds,
+                "boundary_quote_max_age_seconds": (
+                    DAILY_BOUNDARY_MAX_QUOTE_AGE.total_seconds()
+                ),
+                "source_window_complete": window.complete,
+                "daily_bar_emitted": emitted,
+                "suppression_reason": suppression_reason,
+                "database_sha256": receipt.sha256,
+            }
+            audit_rows.append(audit)
+            if checkpoint_connection is not None:
+                _checkpoint_store(
+                    checkpoint_connection,
+                    symbol=symbol,
+                    session_date=session_date,
+                    database_sha256=receipt.sha256,
+                    record=record,
+                    audit=audit,
                 )
-            audit_rows.append(
-                {
-                    "symbol": symbol,
-                    "session_start_local_date": session_date,
-                    "session_end_local_date": session_date + timedelta(days=1),
-                    "session_start_utc": start_utc,
-                    "session_end_utc": end_utc,
-                    "elapsed_hours": (end_utc - start_utc).total_seconds() / 3600,
-                    "expected_hour_count": len(window.expected_hours_utc),
-                    "decoded_hour_count": len(window.decoded_hours_utc),
-                    "no_data_hour_count": len(window.no_data_hours_utc),
-                    "missing_hour_count": len(window.missing_hours_utc),
-                    "missing_hours": "|".join(
-                        value.isoformat() for value in window.missing_hours_utc
-                    ),
-                    "payload_hashes_verified": window.payload_hashes_verified,
-                    "duplicate_timestamps_removed": window.duplicate_timestamps_removed,
-                    "tick_count": len(window.ticks),
-                    "session_open_quote_time": open_quote_time,
-                    "session_close_quote_time": close_quote_time,
-                    "open_quote_delay_seconds": open_quote_delay_seconds,
-                    "close_quote_age_seconds": close_quote_age_seconds,
-                    "boundary_quote_max_age_seconds": (
-                        DAILY_BOUNDARY_MAX_QUOTE_AGE.total_seconds()
-                    ),
-                    "source_window_complete": window.complete,
-                    "daily_bar_emitted": emitted,
-                    "suppression_reason": suppression_reason,
-                    "database_sha256": receipt.sha256,
-                }
-            )
 
     session_audit = pd.DataFrame(audit_rows).sort_values(
         ["session_start_local_date", "symbol"]
