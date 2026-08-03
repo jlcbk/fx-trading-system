@@ -13,7 +13,10 @@ data:
   interval: 1d
   price_mode: bid_ask
   start: "2016-01-01"
-  end: "2026-01-01"
+  # Exclusive NY session-start end. Tick DBs cover [2016-01-01, 2026-01-01) UTC hours
+  # (last hour 2025-12-31T23Z). Session starting 2025-12-31 needs hours into 2026-01-01
+  # 22:00Z and would fail missing_hour_count; last complete session start is 2025-12-30.
+  end: "2025-12-31"
 
 external:
   enabled: true

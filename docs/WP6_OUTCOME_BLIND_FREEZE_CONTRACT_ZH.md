@@ -24,7 +24,8 @@
 |---|---|
 | 行情目录 | `data/dukascopy_sqlite_fresh_20160101_20260101_v111/` |
 | 批次 manifest | `_sqlite_manifest.json`（program 1.1.1） |
-| 区间 | `[2016-01-01, 2026-01-01)` |
+| tick 库区间 | `[2016-01-01, 2026-01-01)` UTC 小时（末小时 `2025-12-31T23Z`） |
+| 冻结日线会话区间 | NY session-start `[2016-01-01, 2025-12-31)` → 最后一场完整会话 start=`2025-12-30`（结束 `2025-12-31T22Z`）。**不可**用 session-start end=`2026-01-01`，否则会纳入 `2025-12-31` 会话并因缺 2026-01-01 小时而 fail closed（2026-08-03 runner 已实测） |
 | 慢周期品种（12） | EURUSD, GBPUSD, USDJPY, USDCHF, AUDUSD, NZDUSD, USDCAD, EURGBP, EURJPY, GBPJPY, AUDJPY, CADJPY |
 | FIX-W 额外腿 | USDNOK, USDSEK（本轮慢周期候选**不**纳入权重） |
 | formal intake | 14/14 `formal_ready`（`outputs/dukascopy_intake/intake_ledger_fresh_v111_20260802.json`） |
