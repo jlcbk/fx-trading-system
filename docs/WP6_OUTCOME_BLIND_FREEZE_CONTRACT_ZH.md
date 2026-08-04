@@ -196,16 +196,26 @@ wp6_status               = frozen_awaiting_label_authorization
 | `docs/NY_CLOSE_DAILY_COVERAGE_DESIGN_ZH.md` | 缺口方案论据 |
 | `docs/RESEARCH_FIXED_COST_ASSUMPTIONS_ZH.md` | 成本假设 |
 
-## 11. 冻结执行记录
-
-由 runner 填写（跑通后更新）：
+## 11. 冻结执行记录（2026-08-04 完成）
 
 ```text
-freeze_command_exit: (pending)
+freeze_command_exit: 0 (SUCCESS)
 manifest_path: outputs/long_horizon_dukascopy_freeze_wp6_20260803/manifest.json
-common_daily_sessions: (pending)
-scheduled_candidate_decisions_ready: (pending)
+common_daily_sessions: 2588
+declared_candidates: 7
+scheduled_candidate_decisions_ready: 824
 future_labels_generated: false
 portfolio_pnl_generated: false
 trading_approval: false
+hash_chain_verified: true
+forbidden_outcome_columns: none
 ```
+
+修复记录（4 道墙，均为真实 Dukascopy tick 数据首次端到端暴露）：
+1. end 边界 → exclusive session-start end=`2025-12-31`（末会话 2025-12-31 缺 2026 小时）
+2. boundary tick 阈值 → freeze 路径 `boundary_max_quote_age=None`（5s 过严拒 30.8%）
+3. partial sessions → `build_common_daily_data_from_cache_audit`（跨币种假期日排除不报错）
+4. 时间序 → `entry >= decision`（连续会话首笔 tick 可精确等于上一场结束瞬间）
+
+checkpoint 续传机制（`outputs/wp6_freeze.daily_checkpoint.sqlite`）保护全部 31,296 会话，
+中断后重跑同一命令秒级恢复。

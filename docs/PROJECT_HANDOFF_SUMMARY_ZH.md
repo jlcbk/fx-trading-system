@@ -39,8 +39,11 @@ formal_net_returns_ready = false   fresh_forward_required = true
 return_labels_opened = false（新14库与第二层均未打开）
 ```
 
-**接手 Agent 的下一项：** WP2 已收尾。下一步是 **WP6 outcome-blind 冻结**
-（含 NY-close 缺口方案的预注册选定）→ 用户单次授权后打开收益标签做预注册检验。
+**WP6 outcome-blind 冻结已完成（2026-08-04）：** 7 慢周期候选、2,588 共同会话、824 ready
+next-open 决策；`future_labels_generated=false`、`trading_approval=false`、哈希链验证通过。
+产物 `outputs/long_horizon_dukascopy_freeze_wp6_20260803/`。合同 `docs/WP6_OUTCOME_BLIND_FREEZE_CONTRACT_ZH.md`。
+
+**接手 Agent 的下一项：** 用户单次授权后打开收益标签做预注册检验（WP6→screen）。
 成本侧等「出现值得验证的候选」再决策商业数据。
 
 ---
