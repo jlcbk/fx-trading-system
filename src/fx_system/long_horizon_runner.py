@@ -547,7 +547,7 @@ def build_frozen_candidate_schedule(
         if ready_rows[["entry_quote_time", "exit_quote_time"]].isna().any(axis=None):
             raise RuntimeError("ready target schedule contains a missing execution boundary")
         if not (
-            (ready_rows["entry_quote_time"] > ready_rows["decision_time"])
+            (ready_rows["entry_quote_time"] >= ready_rows["decision_time"])
             & (ready_rows["exit_quote_time"] > ready_rows["entry_quote_time"])
         ).all():
             raise RuntimeError("ready target schedule violates decision/entry/exit time order")
