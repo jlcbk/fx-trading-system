@@ -97,6 +97,18 @@ uv run fxtrade long-horizon-freeze-sqlite \
 
 不得在打开标签后因样本少而改用 B/C。
 
+### 4.1 日线边界 tick 阈值（2026-08-03 选定）
+
+原 `DAILY_BOUNDARY_MAX_QUOTE_AGE = 5s` 对真实 Dukascopy tick 过严：30.8% 会话（9,619 / 31,308）
+因 22:00 UTC 流动性切换点首/末 tick 延迟 >5s 被拒，被拒会话均为高活跃日（8-15 万 tick）。
+
+**选定：freeze 路径 `boundary_max_quote_age = None`（不因边界延迟 suppress 完整会话）。**
+
+- 完整会话（有 tick、无缺小时）一律出 bar；实际延迟记入审计但不 suppress。
+- 理由：freeze 是 factor-only，用 close-to-close 收益和 OHLC 形态，边界几秒/几分钟对日线因子无影响。
+- `run_dukascopy_daily_from_sqlite` 直接调用仍默认 5s（portfolio ledger 保留严格）。
+- 不得在打开标签后因结果改回 5s 或调阈值。
+
 ## 5. 成本合同（研究层启用，正式层关闭）
 
 | 项 | 冻结值 |
