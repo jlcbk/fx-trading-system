@@ -33,7 +33,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from .dukascopy_daily import (
     DukascopyDailyRun,
-    build_common_daily_data,
+    build_common_daily_data_from_cache_audit,
     run_dukascopy_daily_from_sqlite,
 )
 from .long_horizon import (
@@ -677,7 +677,10 @@ def run_long_horizon_candidate_freeze_from_sqlite(
         checkpoint_path=checkpoint_path,
         boundary_max_quote_age=boundary_max_quote_age,
     )
-    common_daily = build_common_daily_data(daily_run)
+    # Use the cache-audit common-session path: it trusts daily_bar_emitted verdicts
+    # and excludes suppressed sessions without re-imposing the portfolio strictness
+    # (missing-hour/boundary/partial checks) that rejects real Dukascopy tick data.
+    common_daily = build_common_daily_data_from_cache_audit(daily_run)
     build = _build_factor_only(common_daily, config)
     schedule, schedule_audit = build_frozen_candidate_schedule(build, declaration, config)
     manifest = _base_manifest(
