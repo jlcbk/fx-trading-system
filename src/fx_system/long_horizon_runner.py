@@ -22,7 +22,7 @@ import hashlib
 import json
 import math
 from dataclasses import asdict, dataclass
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal
 
@@ -661,6 +661,7 @@ def run_long_horizon_candidate_freeze_from_sqlite(
     registry_path: str | Path,
     transfer_manifest_path: str | Path | None = None,
     checkpoint_path: str | Path | None = None,
+    boundary_max_quote_age: timedelta | None = None,
 ) -> LongHorizonCandidateFreezeResult:
     """Run the maximum safe pre-portfolio stage over verified SQLite inputs."""
 
@@ -674,6 +675,7 @@ def run_long_horizon_candidate_freeze_from_sqlite(
         end,
         transfer_manifest_path=transfer_manifest_path,
         checkpoint_path=checkpoint_path,
+        boundary_max_quote_age=boundary_max_quote_age,
     )
     common_daily = build_common_daily_data(daily_run)
     build = _build_factor_only(common_daily, config)

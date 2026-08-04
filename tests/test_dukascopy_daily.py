@@ -409,8 +409,8 @@ def test_daily_sqlite_runner_rejects_stale_open_and_close_boundary_quotes(
     assert gbp["close_quote_age_seconds"] == 10
     assert not bool(eur["daily_bar_emitted"])
     assert not bool(gbp["daily_bar_emitted"])
-    assert eur["suppression_reason"] == "boundary_quote_outside_5s"
-    assert gbp["suppression_reason"] == "boundary_quote_outside_5s"
+    assert eur["suppression_reason"] == "boundary_quote_outside_threshold"
+    assert gbp["suppression_reason"] == "boundary_quote_outside_threshold"
     assert result.daily_data["EURUSD"].empty
     assert result.daily_data["GBPUSD"].empty
     with pytest.raises(ValueError, match="reject non-holiday daily suppressions"):

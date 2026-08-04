@@ -341,6 +341,7 @@ def run_dukascopy_daily_from_sqlite(
     *,
     transfer_manifest_path: str | Path | None = None,
     checkpoint_path: str | Path | None = None,
+    boundary_max_quote_age: timedelta | None = DAILY_BOUNDARY_MAX_QUOTE_AGE,
 ) -> DukascopyDailyRun:
     """Build 17:00-New-York daily bid/ask bars from transferred SQLite files.
 
@@ -349,6 +350,14 @@ def run_dukascopy_daily_from_sqlite(
     hourly payload is decoded.  The whole-file hash is therefore calculated
     once per symbol, while every decoded hourly payload retains its own hash
     verification through :func:`load_tick_window`.
+
+    ``boundary_max_quote_age`` controls whether a complete session with ticks
+    is suppressed when its first/last quote is farther than this window from
+    the session boundary.  ``None`` disables the check: every complete session
+    emits a bar regardless of boundary tick timing (the actual delay/age is
+    still recorded in the audit).  This is appropriate for factor-only research
+    where OHLC validity matters more than sub-second boundary precision; the
+    portfolio ledger can apply its own stricter filter later.
     """
 
     root = Path(database_directory).resolve()
@@ -445,13 +454,14 @@ def run_dukascopy_daily_from_sqlite(
                 emitted = False
                 suppression_reason = "no_ticks"
             elif (
-                open_quote_delay_seconds
-                > DAILY_BOUNDARY_MAX_QUOTE_AGE.total_seconds()
-                or close_quote_age_seconds
-                > DAILY_BOUNDARY_MAX_QUOTE_AGE.total_seconds()
+                boundary_max_quote_age is not None
+                and (
+                    open_quote_delay_seconds > boundary_max_quote_age.total_seconds()
+                    or close_quote_age_seconds > boundary_max_quote_age.total_seconds()
+                )
             ):
                 emitted = False
-                suppression_reason = "boundary_quote_outside_5s"
+                suppression_reason = "boundary_quote_outside_threshold"
             else:
                 emitted = True
                 suppression_reason = None
@@ -479,7 +489,9 @@ def run_dukascopy_daily_from_sqlite(
                 "open_quote_delay_seconds": open_quote_delay_seconds,
                 "close_quote_age_seconds": close_quote_age_seconds,
                 "boundary_quote_max_age_seconds": (
-                    DAILY_BOUNDARY_MAX_QUOTE_AGE.total_seconds()
+                    boundary_max_quote_age.total_seconds()
+                    if boundary_max_quote_age is not None
+                    else None
                 ),
                 "source_window_complete": window.complete,
                 "daily_bar_emitted": emitted,
